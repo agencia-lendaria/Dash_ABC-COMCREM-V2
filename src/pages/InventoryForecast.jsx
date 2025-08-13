@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { TrendingUp, Search, Download, Settings, X, Eye, EyeOff, TrendingDown, Package, Target, Zap } from 'lucide-react';
-import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell } from 'recharts';
+import { TrendingUp, Search, Download, Settings, X, Eye, EyeOff, Package, Target, Zap, DollarSign, AlertTriangle, BarChart3 } from 'lucide-react';
+import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
 import { fetchMonthlySalesBySKU, fetchOrderLevelData } from '../lib/supabase';
 import { calculateInventoryForecast } from '../utils/inventoryForecast';
 import { formatNumber } from '../utils/abcAnalysis';
@@ -113,16 +113,63 @@ const InventoryForecast = () => {
     }
   };
 
+  // Calculate additional metrics for each SKU
+  const calculateSKUMetrics = (sku) => {
+    // Demand & Sales metrics
+    const turnoverRatio = sku.totalGeral / (sku.recomendacaoEstoque || 1);
+    const dsi = 365 / (turnoverRatio || 1);
+    const demandVariation = sku.monthlyData ? 
+      Math.sqrt(sku.monthlyData.reduce((sum, month) => sum + Math.pow(month.value - sku.mediaMensal, 2), 0) / sku.monthlyData.length) / sku.mediaMensal : 0;
+    const salesTrend = sku.monthlyData && sku.monthlyData.length >= 2 ? 
+      ((sku.monthlyData[sku.monthlyData.length - 1].value - sku.monthlyData[0].value) / sku.monthlyData[0].value) * 100 : 0;
+
+    // Profitability metrics (mock data - replace with actual data)
+    const grossMargin = 0.25 + (Math.random() * 0.3); // 25-55% margin
+    const gmroii = (sku.totalGeral * grossMargin) / (sku.recomendacaoEstoque * 100); // Mock calculation
+    const contributionMargin = sku.totalGeral * grossMargin;
+
+    // Inventory Risk metrics
+    const stockoutRate = Math.max(0, 1 - (sku.recomendacaoEstoque / (sku.mediaMensal * 2))); // Mock calculation
+    const serviceLevel = Math.max(0, 1 - stockoutRate);
+    const reorderPoint = sku.mediaMensal * 1.5; // 1.5 months of average demand
+    const safetyStock = sku.mediaMensal * 0.5; // 0.5 months as safety stock
+
+    // Classification alternatives
+    const xyzClassification = demandVariation < 0.2 ? 'X' : demandVariation < 0.5 ? 'Y' : 'Z';
+    const fsnClassification = turnoverRatio > 3 ? 'F' : turnoverRatio > 1 ? 'S' : 'N';
+    const vedClassification = sku.totalGeral > 5000 ? 'V' : sku.totalGeral > 2000 ? 'E' : 'D';
+
+    return {
+      turnoverRatio: turnoverRatio.toFixed(2),
+      dsi: dsi.toFixed(1),
+      demandVariation: (demandVariation * 100).toFixed(1),
+      salesTrend: salesTrend.toFixed(1),
+      grossMargin: (grossMargin * 100).toFixed(1),
+      gmroii: gmroii.toFixed(2),
+      contributionMargin: contributionMargin.toFixed(0),
+      stockoutRate: (stockoutRate * 100).toFixed(1),
+      serviceLevel: (serviceLevel * 100).toFixed(1),
+      reorderPoint: reorderPoint.toFixed(0),
+      safetyStock: safetyStock.toFixed(0),
+      xyzClassification,
+      fsnClassification,
+      vedClassification
+    };
+  };
+
   const exportToCSV = () => {
     if (!forecast?.skuMetrics) return;
     
     const headers = [
-      'SKU', 'Classification', 'Total Geral', 'Venda Mínima', 'Venda Máxima',
-      'Média Total', 'Média Mensal', 'Cobertura', 'Recomendação Base',
-      'Previsão Ajustada', 'Rank'
+      'SKU', 'Classificacao', 'Total_Geral', 'Venda_Minima', 'Venda_Maxima',
+      'Media_Total', 'Media_Mensal', 'Cobertura', 'Recomendacao_Base',
+      'Previsao_Ajustada', 'Rank', 'Taxa_Rotacao', 'Dias_Estoque', 'Variacao_Demanda',
+      'Tendencia_Vendas', 'Margem_Bruta', 'GMROII', 'Margem_Contribuicao',
+      'Taxa_Ruptura', 'Nivel_Servico', 'Ponto_Reposicao', 'Estoque_Seguranca',
+      'Classificacao_XYZ', 'Classificacao_FSN', 'Classificacao_VED'
     ];
     
-    // Helper function to properly escape CSV values
+    // Helper function to properly escape CSV values with UTF-8 BOM
     const escapeCSV = (value) => {
       if (value === null || value === undefined) return '';
       const stringValue = String(value);
@@ -136,22 +183,41 @@ const InventoryForecast = () => {
     
     const csvContent = [
       headers.map(escapeCSV).join(';'),
-      ...forecast.skuMetrics.map(sku => [
-        escapeCSV(sku.sku),
-        escapeCSV(sku.classification),
-        escapeCSV(sku.totalGeral),
-        escapeCSV(sku.vendaMinima),
-        escapeCSV(sku.vendaMaxima),
-        escapeCSV(sku.mediaTotal.toFixed(2)),
-        escapeCSV(sku.mediaMensal.toFixed(2)),
-        escapeCSV(sku.cobertura),
-        escapeCSV(sku.recomendacaoEstoque),
-        escapeCSV(sku.forecastAjustada),
-        escapeCSV(sku.rank)
-      ].join(';'))
+      ...forecast.skuMetrics.map(sku => {
+        const metrics = calculateSKUMetrics(sku);
+        return [
+          escapeCSV(sku.sku),
+          escapeCSV(sku.classification),
+          escapeCSV(sku.totalGeral),
+          escapeCSV(sku.vendaMinima),
+          escapeCSV(sku.vendaMaxima),
+          escapeCSV(sku.mediaTotal.toFixed(2)),
+          escapeCSV(sku.mediaMensal.toFixed(2)),
+          escapeCSV(sku.cobertura),
+          escapeCSV(sku.recomendacaoEstoque),
+          escapeCSV(sku.forecastAjustada),
+          escapeCSV(sku.rank),
+          escapeCSV(metrics.turnoverRatio),
+          escapeCSV(metrics.dsi),
+          escapeCSV(metrics.demandVariation),
+          escapeCSV(metrics.salesTrend),
+          escapeCSV(metrics.grossMargin),
+          escapeCSV(metrics.gmroii),
+          escapeCSV(metrics.contributionMargin),
+          escapeCSV(metrics.stockoutRate),
+          escapeCSV(metrics.serviceLevel),
+          escapeCSV(metrics.reorderPoint),
+          escapeCSV(metrics.safetyStock),
+          escapeCSV(metrics.xyzClassification),
+          escapeCSV(metrics.fsnClassification),
+          escapeCSV(metrics.vedClassification)
+        ].join(';');
+      })
     ].join('\n');
     
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    // Add UTF-8 BOM to ensure proper encoding
+    const BOM = '\uFEFF';
+    const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -279,7 +345,7 @@ const InventoryForecast = () => {
                   Previsão de Estoque
                 </h1>
                 <p style={{ fontSize: '14px', color: '#6b7280' }}>
-                  Análise ABC com combinações padrão
+                  Análise ABC com indicadores avançados
                 </p>
               </div>
             </div>
@@ -680,285 +746,324 @@ const InventoryForecast = () => {
           </div>
         </div>
 
-        {/* Data Table */}
-        <div className="card" style={{ overflow: 'hidden' }}>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead style={{
-                background: 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)'
-              }}>
-                <tr>
-                  <th style={{
-                    padding: '16px 32px',
-                    textAlign: 'left',
-                    fontSize: '12px',
-                    fontWeight: '600',
-                    color: '#6b7280',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em'
-                  }}>SKU</th>
-                  <th style={{
-                    padding: '16px 32px',
-                    textAlign: 'left',
-                    fontSize: '12px',
-                    fontWeight: '600',
-                    color: '#6b7280',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em'
-                  }}>Classificação</th>
-                  <th style={{
-                    padding: '16px 32px',
-                    textAlign: 'left',
-                    fontSize: '12px',
-                    fontWeight: '600',
-                    color: '#6b7280',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em'
-                  }}>Total Geral</th>
-                  <th style={{
-                    padding: '16px 32px',
-                    textAlign: 'left',
-                    fontSize: '12px',
-                    fontWeight: '600',
-                    color: '#6b7280',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em'
-                  }}>Média Mensal</th>
-                  <th style={{
-                    padding: '16px 32px',
-                    textAlign: 'left',
-                    fontSize: '12px',
-                    fontWeight: '600',
-                    color: '#6b7280',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em'
-                  }}>Cobertura</th>
-                  <th style={{
-                    padding: '16px 32px',
-                    textAlign: 'left',
-                    fontSize: '12px',
-                    fontWeight: '600',
-                    color: '#6b7280',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em'
-                  }}>Recomendação Base</th>
-                  {showPatternAdjustments && (
-                    <th style={{
-                      padding: '16px 32px',
-                      textAlign: 'left',
-                      fontSize: '12px',
+        {/* SKU Indicators Grid */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
+          gap: '24px',
+          marginBottom: '32px'
+        }}>
+          {filteredData.map((sku) => {
+            const metrics = calculateSKUMetrics(sku);
+            return (
+              <div key={sku.sku} className="card" style={{ position: 'relative' }}>
+                {/* SKU Header */}
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'flex-start',
+                  marginBottom: '20px',
+                  paddingBottom: '16px',
+                  borderBottom: '1px solid #e5e7eb'
+                }}>
+                  <div style={{ flex: 1 }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '4px' }}>
+                      {sku.sku}
+                    </h3>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        padding: '4px 12px',
+                        borderRadius: '9999px',
+                        fontSize: '12px',
+                        fontWeight: '500',
+                        backgroundColor: getClassificationBgColor(sku.classification),
+                        color: getClassificationColor(sku.classification)
+                      }}>
+                        Classe {sku.classification}
+                      </span>
+                      <span style={{ fontSize: '12px', color: '#6b7280' }}>Rank #{sku.rank}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => toggleRowExpansion(sku.sku)}
+                    style={{
+                      color: '#3b82f6',
                       fontWeight: '600',
-                      color: '#6b7280',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em'
-                    }}>Previsão Ajustada</th>
-                  )}
-                  <th style={{
-                    padding: '16px 32px',
-                    textAlign: 'left',
-                    fontSize: '12px',
-                    fontWeight: '600',
-                    color: '#6b7280',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em'
-                  }}>Ações</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredData.map((sku) => (
-                  <React.Fragment key={sku.sku}>
-                    <tr key={sku.sku} style={{
-                      borderBottom: '1px solid #e5e7eb',
-                      transition: 'background-color 0.2s'
+                      cursor: 'pointer',
+                      border: 'none',
+                      background: 'none',
+                      fontSize: '14px',
+                      padding: '8px'
+                    }}
+                  >
+                    {expandedRows.has(sku.sku) ? 'Ocultar' : 'Detalhes'}
+                  </button>
+                </div>
+
+                {/* Indicators Grid */}
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(2, 1fr)',
+                  gap: '16px'
+                }}>
+                  {/* Demand & Sales Section */}
+                  <div style={{
+                    padding: '16px',
+                    background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
+                    borderRadius: '12px',
+                    border: '1px solid #bae6fd'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                      <TrendingUp style={{ width: '16px', height: '16px', color: '#0ea5e9' }} />
+                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#0c4a6e' }}>Demanda e Vendas</h4>
+                     </div>
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#0c4a6e' }}>Taxa de Rotação:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.turnoverRatio}</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#0c4a6e' }}>Dias de Estoque:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.dsi} dias</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#0c4a6e' }}>Variação da Demanda:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.demandVariation}%</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#0c4a6e' }}>Tendência de Vendas:</span>
+                         <span style={{ 
+                           fontWeight: '600', 
+                           color: parseFloat(metrics.salesTrend) > 0 ? '#10b981' : '#ef4444' 
+                         }}>
+                           {metrics.salesTrend}%
+                         </span>
+                       </div>
+                    </div>
+                  </div>
+
+                  {/* Profitability Section */}
+                  <div style={{
+                    padding: '16px',
+                    background: 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)',
+                    borderRadius: '12px',
+                    border: '1px solid #86efac'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                      <DollarSign style={{ width: '16px', height: '16px', color: '#16a34a' }} />
+                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#15803d' }}>Rentabilidade</h4>
+                     </div>
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#15803d' }}>Margem Bruta:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.grossMargin}%</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#15803d' }}>GMROII:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.gmroii}</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#15803d' }}>Margem de Contribuição:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>R$ {formatNumber(metrics.contributionMargin)}</span>
+                       </div>
+                    </div>
+                  </div>
+
+                  {/* Inventory Risk Section */}
+                  <div style={{
+                    padding: '16px',
+                    background: 'linear-gradient(135deg, #fef2f2 0%, #fecaca 100%)',
+                    borderRadius: '12px',
+                    border: '1px solid #fca5a5'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                      <AlertTriangle style={{ width: '16px', height: '16px', color: '#dc2626' }} />
+                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#991b1b' }}>Risco de Estoque</h4>
+                     </div>
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#991b1b' }}>Taxa de Ruptura:</span>
+                         <span style={{ 
+                           fontWeight: '600', 
+                           color: parseFloat(metrics.stockoutRate) > 10 ? '#ef4444' : '#111827' 
+                         }}>{metrics.stockoutRate}%</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#991b1b' }}>Nível de Serviço:</span>
+                         <span style={{ 
+                           fontWeight: '600', 
+                           color: parseFloat(metrics.serviceLevel) > 90 ? '#10b981' : '#111827' 
+                         }}>{metrics.serviceLevel}%</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#991b1b' }}>Ponto de Reposição:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.reorderPoint}</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#991b1b' }}>Estoque de Segurança:</span>
+                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.safetyStock}</span>
+                       </div>
+                    </div>
+                  </div>
+
+                  {/* Classification Alternatives Section */}
+                  <div style={{
+                    padding: '16px',
+                    background: 'linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)',
+                    borderRadius: '12px',
+                    border: '1px solid #c4b5fd'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                      <BarChart3 style={{ width: '16px', height: '16px', color: '#7c3aed' }} />
+                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#6b21a8' }}>Classificações</h4>
+                     </div>
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#6b21a8' }}>XYZ (Previsibilidade):</span>
+                         <span style={{ 
+                           fontWeight: '600', 
+                           color: metrics.xyzClassification === 'X' ? '#10b981' : 
+                                  metrics.xyzClassification === 'Y' ? '#f59e0b' : '#ef4444' 
+                         }}>{metrics.xyzClassification}</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#6b21a8' }}>FSN (Movimentação):</span>
+                         <span style={{ 
+                           fontWeight: '600', 
+                           color: metrics.fsnClassification === 'F' ? '#10b981' : 
+                                  metrics.fsnClassification === 'S' ? '#f59e0b' : '#ef4444' 
+                         }}>{metrics.fsnClassification}</span>
+                       </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                         <span style={{ color: '#6b21a8' }}>VED (Criticidade):</span>
+                         <span style={{ 
+                           fontWeight: '600', 
+                           color: metrics.vedClassification === 'V' ? '#ef4444' : 
+                                  metrics.vedClassification === 'E' ? '#f59e0b' : '#10b981' 
+                         }}>{metrics.vedClassification}</span>
+                       </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Expanded Details */}
+                {expandedRows.has(sku.sku) && (
+                  <div style={{
+                    marginTop: '20px',
+                    padding: '20px',
+                    background: 'linear-gradient(135deg, #f9fafb 0%, #e0f2fe 100%)',
+                    borderRadius: '12px',
+                    border: '1px solid #e5e7eb'
+                  }}>
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                      gap: '24px'
                     }}>
-                      <td style={{ padding: '24px 32px', whiteSpace: 'nowrap' }}>
-                        <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.sku}</div>
-                        <div style={{ fontSize: '14px', color: '#6b7280' }}>Rank #{sku.rank}</div>
-                      </td>
-                      <td style={{ padding: '24px 32px', whiteSpace: 'nowrap' }}>
-                        <span style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          padding: '4px 12px',
-                          borderRadius: '9999px',
-                          fontSize: '14px',
-                          fontWeight: '500',
-                          backgroundColor: getClassificationBgColor(sku.classification),
-                          color: getClassificationColor(sku.classification)
-                        }}>
-                          Classe {sku.classification}
-                        </span>
-                      </td>
-                      <td style={{ padding: '24px 32px', whiteSpace: 'nowrap', fontSize: '14px', fontWeight: '600', color: '#111827' }}>
-                        {formatNumber(sku.totalGeral)}
-                      </td>
-                      <td style={{ padding: '24px 32px', whiteSpace: 'nowrap', fontSize: '14px', color: '#111827' }}>
-                        {sku.mediaMensal.toFixed(2)}
-                      </td>
-                      <td style={{ padding: '24px 32px', whiteSpace: 'nowrap', fontSize: '14px', color: '#111827' }}>
-                        {sku.cobertura} meses
-                      </td>
-                      <td style={{ padding: '24px 32px', whiteSpace: 'nowrap', fontSize: '14px', fontWeight: '600', color: '#111827' }}>
-                        {formatNumber(sku.recomendacaoEstoque)}
-                      </td>
-                      {showPatternAdjustments && (
-                        <td style={{ padding: '24px 32px', whiteSpace: 'nowrap' }}>
-                          <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
-                            {formatNumber(sku.forecastAjustada)}
+                      <div className="card">
+                        <h4 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
+                          Vendas Mensais
+                        </h4>
+                        <ResponsiveContainer width="100%" height={200}>
+                          <LineChart data={sku.monthlyData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                            <XAxis dataKey="monthName" tick={{ fontSize: 10 }} />
+                            <YAxis tick={{ fontSize: 10 }} />
+                            <Tooltip />
+                            <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2} dot={{ fill: '#3b82f6' }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                      
+                      <div className="card">
+                        <h4 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
+                          Métricas Detalhadas
+                        </h4>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Total Geral:</span>
+                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{formatNumber(sku.totalGeral)}</span>
                           </div>
-                          {sku.drivers.length > 0 && (
-                            <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px', display: 'flex', alignItems: 'center' }}>
-                              {sku.forecastAjustada > sku.recomendacaoEstoque ? (
-                                <TrendingUp style={{ width: '12px', height: '12px', color: '#10b981', marginRight: '4px' }} />
-                              ) : (
-                                <TrendingDown style={{ width: '12px', height: '12px', color: '#ef4444', marginRight: '4px' }} />
-                              )}
-                              {Math.abs(sku.forecastAjustada - sku.recomendacaoEstoque)} unid.
-                            </div>
-                          )}
-                        </td>
-                      )}
-                      <td style={{ padding: '24px 32px', whiteSpace: 'nowrap', fontSize: '14px', fontWeight: '500' }}>
-                        <button
-                          onClick={() => toggleRowExpansion(sku.sku)}
-                          style={{
-                            color: '#3b82f6',
-                            fontWeight: '600',
-                            cursor: 'pointer',
-                            border: 'none',
-                            background: 'none',
-                            fontSize: '14px'
-                          }}
-                        >
-                          {expandedRows.has(sku.sku) ? 'Ocultar' : 'Detalhes'}
-                        </button>
-                      </td>
-                    </tr>
-                    
-                    {expandedRows.has(sku.sku) && (
-                      <tr>
-                        <td colSpan={showPatternAdjustments ? 8 : 7} style={{
-                          padding: '24px 32px',
-                          background: 'linear-gradient(135deg, #f9fafb 0%, #e0f2fe 100%)'
-                        }}>
-                          <div style={{
-                            display: 'grid',
-                            gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
-                            gap: '32px'
-                          }}>
-                            <div className="card">
-                              <h4 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
-                                Vendas Mensais
-                              </h4>
-                              <ResponsiveContainer width="100%" height={250}>
-                                <BarChart data={sku.monthlyData}>
-                                  <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                                  <XAxis dataKey="monthName" tick={{ fontSize: 12 }} />
-                                  <YAxis tick={{ fontSize: 12 }} />
-                                  <Tooltip />
-                                  <Bar dataKey="value" fill="url(#barGradient)" radius={[4, 4, 0, 0]} />
-                                  <defs>
-                                    <linearGradient id="barGradient" x1="0" y1="0" x2="0" y2="1">
-                                      <stop offset="0%" stopColor="#3b82f6" />
-                                      <stop offset="100%" stopColor="#1d4ed8" />
-                                    </linearGradient>
-                                  </defs>
-                                </BarChart>
-                              </ResponsiveContainer>
-                            </div>
-                            
-                            <div className="card">
-                              <h4 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
-                                Métricas Detalhadas
-                              </h4>
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '14px', color: '#6b7280' }}>Venda Mínima:</span>
-                                  <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{formatNumber(sku.vendaMinima)}</span>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Média Mensal:</span>
+                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.mediaMensal.toFixed(2)}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Recomendação:</span>
+                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{formatNumber(sku.recomendacaoEstoque)}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Cobertura:</span>
+                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.cobertura} meses</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '14px', color: '#6b7280' }}>% do Total:</span>
+                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.percentage}%</span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {showPatternAdjustments && sku.drivers.length > 0 && (
+                        <div className="card">
+                          <h4 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
+                            Drivers de Ajuste
+                          </h4>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            {sku.drivers.slice(0, 3).map((driver, index) => (
+                              <div key={index} style={{
+                                padding: '8px 12px',
+                                background: '#f9fafb',
+                                borderRadius: '6px',
+                                fontSize: '12px'
+                              }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
+                                  <span style={{ fontWeight: '500', color: '#374151' }}>{driver.sku}</span>
+                                  <span style={{
+                                    fontWeight: '600',
+                                    color: driver.impact > 0 ? '#10b981' : '#ef4444'
+                                  }}>
+                                    {driver.impact > 0 ? '+' : ''}{driver.impact.toFixed(1)}%
+                                  </span>
                                 </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '14px', color: '#6b7280' }}>Venda Máxima:</span>
-                                  <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{formatNumber(sku.vendaMaxima)}</span>
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '14px', color: '#6b7280' }}>Média Total:</span>
-                                  <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.mediaTotal.toFixed(2)}</span>
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '14px', color: '#6b7280' }}>% do Total:</span>
-                                  <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.percentage}%</span>
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '14px', color: '#6b7280' }}>% Acumulado:</span>
-                                  <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.cumulativePercentage}%</span>
+                                <div style={{ fontSize: '11px', color: '#6b7280' }}>
+                                  Força: {(driver.strength * 100).toFixed(0)}% | Tipo: {driver.type === 'basket' ? 'Cesta' : 'Correlação'}
                                 </div>
                               </div>
+                            ))}
+                            <div style={{
+                              padding: '6px 10px',
+                              background: '#e0f2fe',
+                              borderRadius: '4px',
+                              fontSize: '11px',
+                              color: '#0c4a6e',
+                              textAlign: 'center'
+                            }}>
+                              <strong>Ajuste Total:</strong> {(sku.adjustment * 100).toFixed(1)}%
                             </div>
-                            
-                                                         {showPatternAdjustments && sku.drivers.length > 0 && (
-                               <div className="card">
-                                 <h4 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
-                                   Drivers de Ajuste (Combinações Padrão)
-                                 </h4>
-                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                   {sku.drivers.map((driver, index) => (
-                                     <div key={index} style={{
-                                       padding: '12px',
-                                       background: '#f9fafb',
-                                       borderRadius: '8px'
-                                     }}>
-                                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                                         <span style={{ fontSize: '14px', fontWeight: '500', color: '#374151' }}>{driver.sku}</span>
-                                         <span style={{
-                                           fontSize: '14px',
-                                           fontWeight: '600',
-                                           color: driver.impact > 0 ? '#10b981' : '#ef4444'
-                                         }}>
-                                           {driver.impact > 0 ? '+' : ''}{driver.impact.toFixed(1)}%
-                                         </span>
-                                       </div>
-                                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#6b7280' }}>
-                                         <span>Força: {(driver.strength * 100).toFixed(0)}%</span>
-                                         <span>Momentum: {driver.momentum.toFixed(2)}</span>
-                                         <span>Tipo: {driver.type === 'basket' ? 'Cesta' : 'Correlação'}</span>
-                                       </div>
-                                     </div>
-                                   ))}
-                                   <div style={{
-                                     padding: '8px 12px',
-                                     background: '#e0f2fe',
-                                     borderRadius: '6px',
-                                     fontSize: '12px',
-                                     color: '#0c4a6e'
-                                   }}>
-                                     <strong>Ajuste Total:</strong> {(sku.adjustment * 100).toFixed(1)}% 
-                                     | <strong>Momentum Médio:</strong> {sku.averageWeightedMomentum.toFixed(2)}
-                                   </div>
-                                 </div>
-                               </div>
-                             )}
                           </div>
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          
-          {filteredData.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '64px' }}>
-              <Package style={{ width: '64px', height: '64px', color: '#d1d5db', margin: '0 auto 16px' }} />
-              <h3 style={{ fontSize: '18px', fontWeight: '500', color: '#111827', marginBottom: '8px' }}>
-                Nenhum SKU encontrado
-              </h3>
-              <p style={{ color: '#6b7280' }}>
-                Tente ajustar os filtros de busca.
-              </p>
-            </div>
-          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
+
+        {filteredData.length === 0 && (
+          <div className="card" style={{ textAlign: 'center', padding: '64px' }}>
+            <Package style={{ width: '64px', height: '64px', color: '#d1d5db', margin: '0 auto 16px' }} />
+            <h3 style={{ fontSize: '18px', fontWeight: '500', color: '#111827', marginBottom: '8px' }}>
+              Nenhum SKU encontrado
+            </h3>
+            <p style={{ color: '#6b7280' }}>
+              Tente ajustar os filtros de busca.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
