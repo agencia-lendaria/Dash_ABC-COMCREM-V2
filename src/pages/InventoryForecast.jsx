@@ -46,6 +46,35 @@ const InventoryForecast = () => {
     return mean > 0 ? Math.sqrt(variance) / mean : 0;
   };
 
+  // Validate product data for suspicious patterns (NEW - MEDIUM PRIORITY)
+  const validateProductData = (sku, salesArray) => {
+    const issues = [];
+    
+    // Check for extreme spikes
+    const maxSale = Math.max(...salesArray);
+    const avgSale = salesArray.reduce((sum, val) => sum + val, 0) / 12;
+    if (maxSale > avgSale * 20 && avgSale > 0) {
+      issues.push('extreme_spike');
+    }
+    
+    // Check for very low activity
+    const activeMonths = salesArray.filter(x => x > 0).length;
+    if (activeMonths <= 2) {
+      issues.push('very_low_activity');
+    }
+    
+    // Check for negative values
+    if (salesArray.some(x => x < 0)) {
+      issues.push('negative_sales');
+    }
+    
+    return {
+      isValid: issues.length === 0,
+      issues: issues,
+      needsReview: issues.includes('extreme_spike') || issues.includes('very_low_activity')
+    };
+  };
+
   // Calculate Pearson correlation coefficient between two product sales arrays
   const calculateCorrelation = (productA, productB) => {
     const salesA = [
@@ -177,6 +206,18 @@ const InventoryForecast = () => {
       sku.julho, sku.agosto, sku.setembro, sku.outubro, sku.novembro, sku.dezembro
     ];
     const avgLast6Months = last6Months.reduce((sum, val) => sum + val, 0) / 6;
+    
+    // Prevent division by zero and handle edge cases (FIXED - MEDIUM PRIORITY)
+    if (avgLast6Months === 0 || isNaN(avgLast6Months)) {
+      return {
+        avgLast6Months: 0,
+        isAboveThreshold: false,
+        safeMargin: 0,
+        recommendation: 'Sem vendas nos últimos 6 meses',
+        marginType: 'none',
+        threshold: autoThreshold
+      };
+    }
     
     // Rule: If average of last 6 months >= auto-calculated threshold, use safe margin
     const isAboveThreshold = avgLast6Months >= autoThreshold;
@@ -316,25 +357,33 @@ const InventoryForecast = () => {
         const nonZeroSales = salesArray.filter(x => x > 0);
         
         const totalGeral = salesArray.reduce((sum, val) => sum + val, 0);
-        const vendaMinima = nonZeroSales.length > 0 ? Math.min(...nonZeroSales) : 0;
-        const vendaMaxima = nonZeroSales.length > 0 ? Math.max(...nonZeroSales) : 0;
+        const vendaMinima = Math.min(...salesArray); // FIXED - Include all months, including zeros
+        const vendaMaxima = Math.max(...salesArray);
         const mediaTotal = totalGeral / 12; // Fixed average calculation
         const mediaMensal = totalGeral / 12; // Average across 12 months
         
         // Calculate demand variability for stock multiplier
         const demandVariability = calculateDemandVariability(salesArray);
         
-        // Get stock multiplier based on product class (will be calculated after ABC classification)
-        const getStockMultiplier = (classification, variability) => {
+        // Validate product data (NEW - MEDIUM PRIORITY)
+        const validation = validateProductData(sku, salesArray);
+        
+        // Get stock multiplier based on product class (FIXED - HIGH PRIORITY)
+        const getStockMultiplier = (classification, variability, seasonality) => {
           const baseMultiplier = {
-            'A': 3.0,  // Higher stock for critical items
+            'A': 3.5,  // Higher stock for critical items
             'B': 2.5,  // Standard stock
-            'C': 2.0   // Lower stock for less important items
+            'C': 1.8   // Lower stock for less important items
           };
           
           // Adjust for demand variability
           const variabilityAdjustment = variability > 0.5 ? 0.5 : 0;
-          return baseMultiplier[classification] + variabilityAdjustment;
+          
+          // Adjust for seasonality (few active months)
+          const monthsActive = salesArray.filter(x => x > 0).length;
+          const seasonalityAdjustment = monthsActive <= 6 ? 0.3 : 0;
+          
+          return baseMultiplier[classification] + variabilityAdjustment + seasonalityAdjustment;
         };
         
         // Temporary stock recommendation (will be updated after ABC classification)
@@ -352,6 +401,7 @@ const InventoryForecast = () => {
             mediaMensal,
             recomendacaoEstoque,
             safeMargin,
+            validation,
             isVisible: totalGeral > 0, // Show all SKUs with sales
             monthsWithSales: nonZeroSales.length
           };
@@ -383,12 +433,21 @@ const InventoryForecast = () => {
         console.log(`🔍 Sample quantities:`, processedRawData.slice(0, 10).map(r => ({ sku: r.DESCRICAO, quantity: r.QUANTIDADE_NUM, original: r.QUANTIDADE })));
       }
 
-      // Filter out SKUs with no sales and calculate ABC classification
+      // Filter out SKUs with no sales and use shared ABC analysis
       const activeSkus = processedData.filter(sku => sku.totalGeral > 0);
-      const classifiedData = safeCalculation(
-        () => calculateABCClassification(activeSkus),
-        activeSkus.map(item => ({ ...item, curva: 'C' }))
-      );
+      
+      // Use shared utility for ABC classification (FIXED - CRITICAL)
+      const productAnalysis = calculateProductAnalysis(rawData);
+      const abcMap = new Map();
+      productAnalysis.data.forEach(item => {
+        abcMap.set(item.name, item.classification);
+      });
+      
+      // Apply ABC classification from shared utility
+      const classifiedData = activeSkus.map(sku => ({
+        ...sku,
+        curva: abcMap.get(sku.sku) || 'C' // Get from shared utility
+      }));
       
       // Auto-calculate safe margin threshold as 75th percentile
       const allProductAverages = activeSkus.map(sku => {
@@ -405,16 +464,21 @@ const InventoryForecast = () => {
         ];
         const demandVariability = calculateDemandVariability(salesArray);
         
-        const getStockMultiplier = (classification, variability) => {
+        const getStockMultiplier = (classification, variability, seasonality) => {
           const baseMultiplier = {
-            'A': 3.0,  // Higher stock for critical items
+            'A': 3.5,  // Higher stock for critical items
             'B': 2.5,  // Standard stock
-            'C': 2.0   // Lower stock for less important items
+            'C': 1.8   // Lower stock for less important items
           };
           
           // Adjust for demand variability
           const variabilityAdjustment = variability > 0.5 ? 0.5 : 0;
-          return baseMultiplier[classification] + variabilityAdjustment;
+          
+          // Adjust for seasonality (few active months)
+          const monthsActive = salesArray.filter(x => x > 0).length;
+          const seasonalityAdjustment = monthsActive <= 6 ? 0.3 : 0;
+          
+          return baseMultiplier[classification] + variabilityAdjustment + seasonalityAdjustment;
         };
         
         const stockMultiplier = getStockMultiplier(sku.curva, demandVariability);
@@ -431,7 +495,7 @@ const InventoryForecast = () => {
         };
       });
       
-      // Auto-determine best seller percentage using Pareto principle
+      // Auto-determine best seller percentage using Pareto principle (FIXED - CRITICAL)
       const findNaturalBreak = (sortedData) => {
         const totalSales = sortedData.reduce((sum, item) => sum + item.totalGeral, 0);
         let cumulativePercent = 0;
@@ -449,12 +513,30 @@ const InventoryForecast = () => {
       const bestSellerThreshold = findNaturalBreak(sortedByTotal);
       const visibleThreshold = Math.ceil(sortedByTotal.length * 0.3); // Top 30% are visible by default
       
+      // Apply best seller and ranking AFTER ABC classification (FIXED - CRITICAL)
       sortedByTotal.forEach((item, index) => {
         item.isBestSeller = index < bestSellerThreshold;
         item.isVisible = index < visibleThreshold;
         item.rank = index + 1;
       });
 
+      // Log ABC distribution for verification (FIXED - CRITICAL)
+      const abcDistribution = {
+        A: updatedData.filter(item => item.curva === 'A').length,
+        B: updatedData.filter(item => item.curva === 'B').length,
+        C: updatedData.filter(item => item.curva === 'C').length
+      };
+      console.log(`📊 ABC Distribution: A=${abcDistribution.A}, B=${abcDistribution.B}, C=${abcDistribution.C}`);
+      console.log(`📊 ABC Percentages: A=${((abcDistribution.A/updatedData.length)*100).toFixed(1)}%, B=${((abcDistribution.B/updatedData.length)*100).toFixed(1)}%, C=${((abcDistribution.C/updatedData.length)*100).toFixed(1)}%`);
+      
+      // Log validation results
+      const validationResults = {
+        valid: updatedData.filter(item => item.validation?.isValid).length,
+        needsReview: updatedData.filter(item => item.validation?.needsReview).length,
+        total: updatedData.length
+      };
+      console.log(`🔍 Validation Results: Valid=${validationResults.valid}, Needs Review=${validationResults.needsReview}, Total=${validationResults.total}`);
+      
       console.log(`✅ Processed ${updatedData.length} SKUs, ${bestSellerThreshold} best sellers, ${visibleThreshold} visible`);
       console.log(`📊 Auto-calculated threshold: ${autoThreshold.toFixed(0)} units/month`);
       
@@ -1424,6 +1506,15 @@ const InventoryForecast = () => {
                         }}>
                           {item.safeMargin.marginType === 'safe' ? '✓ 2 meses' : '⚠ 1.5 meses'}
                         </span>
+                        {item.validation?.needsReview && (
+                          <span style={{ 
+                            fontSize: '0.5rem', 
+                            color: '#ef4444',
+                            fontWeight: '500'
+                          }}>
+                            ⚠ Revisar
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'center' }}>
