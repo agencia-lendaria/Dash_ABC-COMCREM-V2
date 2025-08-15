@@ -137,29 +137,29 @@ export const getTotalRowCount = async () => {
 // Function to fetch monthly sales by SKU for inventory forecast
 export const fetchMonthlySalesBySKU = async (analysisWindow = 5) => {
   try {
-    console.log(`🔍 Fetching monthly sales by SKU for ${analysisWindow}-month window...`);
+    console.log(`🔍 Fetching monthly sales by SKU for inventory analysis...`);
     
-    // Get the current date and calculate the start date for the analysis window
-    const now = new Date();
-    const startDate = new Date(now.getFullYear(), now.getMonth() - analysisWindow + 1, 1);
-    
-    console.log(`📅 Analysis window: ${startDate.toISOString().split('T')[0]} to ${now.toISOString().split('T')[0]}`);
-    
-    // Build the query to aggregate monthly sales by SKU
-    const { data, error } = await supabase
+    // For inventory analysis, we need all historical data to build monthly patterns
+    // Build the query to get all sales data by SKU
+    const baseQuery = supabase
       .from('Concrem_Value')
       .select(`
         DESCRICAO,
         QUANTIDADE,
         DTEMISSAO
       `)
-      .gte('DTEMISSAO', startDate.toISOString())
-      .lte('DTEMISSAO', now.toISOString())
-      .not('DESCRICAO', 'is', null);
-    
-    if (error) throw error;
+      .not('DESCRICAO', 'is', null)
+      .order('DTEMISSAO', { ascending: true });
+
+    // Fetch all data using pagination
+    const data = await fetchAllData(baseQuery);
     
     console.log(`📊 Fetched ${data?.length || 0} records for monthly sales analysis`);
+    
+    if (data && data.length > 0) {
+      console.log(`📅 Date range: ${data[0]?.DTEMISSAO} to ${data[data.length - 1]?.DTEMISSAO}`);
+      console.log(`📦 Sample SKUs:`, [...new Set(data.slice(0, 10).map(row => row.DESCRICAO))]);
+    }
     
     return data;
   } catch (error) {
@@ -173,12 +173,9 @@ export const fetchOrderLevelData = async (analysisWindow = 5) => {
   try {
     console.log(`🔍 Fetching order-level data for association analysis...`);
     
-    // Get the current date and calculate the start date for the analysis window
-    const now = new Date();
-    const startDate = new Date(now.getFullYear(), now.getMonth() - analysisWindow + 1, 1);
-    
-    // Fetch data with only the fields that exist in the database
-    const { data, error } = await supabase
+    // For inventory analysis, we need all historical data for association analysis
+    // Build the query to get all order data
+    const baseQuery = supabase
       .from('Concrem_Value')
       .select(`
         DESCRICAO,
@@ -186,13 +183,18 @@ export const fetchOrderLevelData = async (analysisWindow = 5) => {
         DTEMISSAO,
         NOME
       `)
-      .gte('DTEMISSAO', startDate.toISOString())
-      .lte('DTEMISSAO', now.toISOString())
-      .not('DESCRICAO', 'is', null);
-    
-    if (error) throw error;
+      .not('DESCRICAO', 'is', null)
+      .order('DTEMISSAO', { ascending: true });
+
+    // Fetch all data using pagination
+    const data = await fetchAllData(baseQuery);
     
     console.log(`📊 Fetched ${data?.length || 0} records for association analysis`);
+    
+    if (data && data.length > 0) {
+      console.log(`📅 Date range: ${data[0]?.DTEMISSAO} to ${data[data.length - 1]?.DTEMISSAO}`);
+      console.log(`👥 Sample customers:`, [...new Set(data.slice(0, 10).map(row => row.NOME))].filter(Boolean));
+    }
     
     return data;
   } catch (error) {
