@@ -618,6 +618,17 @@ const InventoryForecast = () => {
   }, [data, generateKitRecommendations]);
 
   const filteredData = useMemo(() => {
+    console.log('Filtering data:', {
+      searchTerm,
+      selectedClass,
+      showOnlyVisible,
+      showBestSellers,
+      kitFilter,
+      validationFilter,
+      seasonalityFilter,
+      productRecommendationsCount: productRecommendations.length
+    });
+
     let filtered = data.filter(item => {
       // Search filter
       const matchesSearch = item.sku.toLowerCase().includes(searchTerm.toLowerCase());
@@ -635,10 +646,12 @@ const InventoryForecast = () => {
       const matchesKitFilter = (() => {
         if (kitFilter === 'all') return true;
         if (kitFilter === 'in_kits') {
-          return productRecommendations.some(product => product.sku === item.sku);
+          const isInKits = productRecommendations.some(product => product.sku === item.sku);
+          return isInKits;
         }
         if (kitFilter === 'not_in_kits') {
-          return !productRecommendations.some(product => product.sku === item.sku);
+          const isInKits = productRecommendations.some(product => product.sku === item.sku);
+          return !isInKits;
         }
         return true;
       })();
@@ -646,23 +659,25 @@ const InventoryForecast = () => {
       // Validation filter
       const matchesValidationFilter = (() => {
         if (validationFilter === 'all') return true;
-        if (validationFilter === 'valid') return item.validation?.isValid;
-        if (validationFilter === 'needs_review') return item.validation?.needsReview;
-        if (validationFilter === 'has_issues') return !item.validation?.isValid;
+        if (validationFilter === 'valid') return item.validation?.isValid === true;
+        if (validationFilter === 'needs_review') return item.validation?.needsReview === true;
+        if (validationFilter === 'has_issues') return item.validation?.isValid === false;
         return true;
       })();
       
       // Seasonality filter
       const matchesSeasonalityFilter = (() => {
         if (seasonalityFilter === 'all') return true;
-        if (seasonalityFilter === 'seasonal') return item.monthsWithSales <= 3;
-        if (seasonalityFilter === 'low_activity') return item.monthsWithSales <= 6;
-        if (seasonalityFilter === 'year_round') return item.monthsWithSales > 6;
+        if (seasonalityFilter === 'seasonal') return (item.monthsWithSales || 0) <= 3;
+        if (seasonalityFilter === 'low_activity') return (item.monthsWithSales || 0) <= 6;
+        if (seasonalityFilter === 'year_round') return (item.monthsWithSales || 0) > 6;
         return true;
       })();
       
-      return matchesSearch && matchesClass && matchesVisibility && matchesBestSellers && 
+      const allMatch = matchesSearch && matchesClass && matchesVisibility && matchesBestSellers && 
              matchesKitFilter && matchesValidationFilter && matchesSeasonalityFilter;
+      
+      return allMatch;
     });
 
     // Sort data
@@ -677,6 +692,7 @@ const InventoryForecast = () => {
       }
     });
 
+    console.log(`Filtered ${filtered.length} products from ${data.length} total`);
     return filtered;
   }, [data, searchTerm, selectedClass, showOnlyVisible, showBestSellers, sortConfig, 
       kitFilter, validationFilter, seasonalityFilter, productRecommendations]);
@@ -772,16 +788,7 @@ const InventoryForecast = () => {
         Math.round(kit.recommendedStock),
         Math.round(kit.potential)
       ].join(';')),
-      '',
-      '=== PRODUTOS EM MÚLTIPLOS KITS ===',
-      'SKU;Classificacao;Vendas_Totais;Numero_Kits;Kits',
-      ...productRecommendations.map(product => [
-        `"${product.sku}"`,
-        product.classification,
-        product.totalSales,
-        product.kitCount,
-        product.kits.join(',')
-      ].join(';'))
+
     ].join('\n');
     
     const BOM = '\uFEFF';
@@ -1704,115 +1711,7 @@ const InventoryForecast = () => {
           )}
         </div>
 
-        {/* Product Recommendations */}
-        {productRecommendations.length > 0 && (
-          <div className="card" style={{ marginBottom: 'var(--spacing-2xl)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-lg)' }}>
-              <div>
-                <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
-                  🎯 Produtos em Múltiplos Kits
-                </h3>
-                <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
-                  Produtos que aparecem em vários kits - recomendações unitárias
-                </p>
-              </div>
-            </div>
 
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))',
-              gap: 'var(--spacing-lg)'
-            }}>
-              {productRecommendations.map((product, index) => (
-                <div 
-                  key={product.sku} 
-                  className="card"
-                  style={{ cursor: 'pointer', transition: 'all 0.2s' }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.transform = 'translateY(-2px)';
-                    e.currentTarget.style.boxShadow = 'var(--shadow-lg)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = 'var(--shadow-md)';
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-md)' }}>
-                    <div style={{
-                      background: 'var(--blue)',
-                      color: 'white',
-                      padding: 'var(--spacing-xs) var(--spacing-md)',
-                      borderRadius: '20px',
-                      fontSize: '0.75rem',
-                      fontWeight: '600'
-                    }}>
-                      Produto #{index + 1}
-                    </div>
-                    <div style={{
-                      background: product.kitCount >= 5 ? '#dcfce7' : product.kitCount >= 3 ? '#fef3c7' : '#fee2e2',
-                      color: product.kitCount >= 5 ? '#166534' : product.kitCount >= 3 ? '#92400e' : '#991b1b',
-                      padding: 'var(--spacing-xs) var(--spacing-sm)',
-                      borderRadius: 'var(--radius-md)',
-                      fontSize: '0.75rem',
-                      fontWeight: '600'
-                    }}>
-                      {product.kitCount} kits
-                    </div>
-                  </div>
-
-                  <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                    <div 
-                      style={{ 
-                        fontSize: '0.875rem', 
-                        fontWeight: '500', 
-                        color: 'var(--charcoal-black)', 
-                        marginBottom: 'var(--spacing-sm)',
-                        cursor: product.sku.length > 50 ? 'help' : 'default'
-                      }}
-                      title={product.sku.length > 50 ? product.sku : ''}
-                    >
-                      {product.sku.length > 50 ? product.sku.substring(0, 50) + '...' : product.sku}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm)' }}>
-                      <span style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        width: '24px',
-                        height: '24px',
-                        borderRadius: '50%',
-                        fontSize: '0.75rem',
-                        fontWeight: '600',
-                        backgroundColor: getClassificationBgColor(product.classification),
-                        color: getClassificationColor(product.classification)
-                      }}>
-                        {product.classification}
-                      </span>
-                      <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
-                        {product.totalSales.toLocaleString()} vendas totais
-                      </span>
-                    </div>
-                  </div>
-
-                  <div style={{
-                    padding: 'var(--spacing-sm)',
-                    background: '#f8fafc',
-                    borderRadius: 'var(--radius-lg)',
-                    fontSize: '0.75rem',
-                    color: '#6b7280'
-                  }}>
-                    <div style={{ marginBottom: 'var(--spacing-xs)' }}>
-                      <strong>Kits:</strong> {product.kits.join(', ')}
-                    </div>
-                    <div>
-                      <strong>Recomendação:</strong> Produto versátil - manter estoque elevado
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
 
         {/* Modal de Detalhes do Kit */}
         {selectedKit && (
