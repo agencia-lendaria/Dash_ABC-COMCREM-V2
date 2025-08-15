@@ -1,86 +1,352 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { TrendingUp, Search, Download, Settings, X, Eye, EyeOff, Package, Target, Zap, DollarSign, AlertTriangle, BarChart3 } from 'lucide-react';
-import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
-import { fetchMonthlySalesBySKU, fetchOrderLevelData } from '../lib/supabase';
-import { calculateInventoryForecast } from '../utils/inventoryForecast';
-import { formatNumber } from '../utils/abcAnalysis';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Package, Search, Download, Filter, BarChart3, Target, Eye, EyeOff, Star } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { fetchConcremData } from '../lib/supabase';
+import { calculateProductAnalysis, validateDataQuality } from '../utils/abcAnalysis';
 
 const InventoryForecast = () => {
-  const [forecast, setForecast] = useState(null);
+  const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedClassification, setSelectedClassification] = useState('all');
-  const [showSettings, setShowSettings] = useState(false);
-  const [showPatternAdjustments, setShowPatternAdjustments] = useState(true);
-  const [expandedRows, setExpandedRows] = useState(new Set());
+  const [selectedClass, setSelectedClass] = useState('all');
+  const [showOnlyVisible, setShowOnlyVisible] = useState(true);
+  const [showBestSellers, setShowBestSellers] = useState(true);
   const [sortConfig, setSortConfig] = useState({ key: 'totalGeral', direction: 'desc' });
+  const [kitRecommendations, setKitRecommendations] = useState([]);
+  const [correlationThreshold, setCorrelationThreshold] = useState(0.6);
 
-  const [config, setConfig] = useState({
-    analysisWindow: 5,
-    abcThresholds: { a: 20, b: 30, c: 50 },
-    coberturaConfig: { A: 2, B: 6, C: 6 },
-    associationConfig: {
-      correlationThreshold: 0.6,
-      topK: 5,
-      alpha: 0.15
+  const monthNames = [
+    'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+    'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+  ];
+
+  // Calculate Pearson correlation coefficient between two product sales arrays
+  const calculateCorrelation = (productA, productB) => {
+    const salesA = [
+      productA.janeiro, productA.fevereiro, productA.março, productA.abril,
+      productA.maio, productA.junho, productA.julho, productA.agosto,
+      productA.setembro, productA.outubro, productA.novembro, productA.dezembro
+    ];
+    const salesB = [
+      productB.janeiro, productB.fevereiro, productB.março, productB.abril,
+      productB.maio, productB.junho, productB.julho, productB.agosto,
+      productB.setembro, productB.outubro, productB.novembro, productB.dezembro
+    ];
+
+    const n = salesA.length;
+    const sumA = salesA.reduce((sum, val) => sum + val, 0);
+    const sumB = salesB.reduce((sum, val) => sum + val, 0);
+    const sumAB = salesA.reduce((sum, val, i) => sum + val * salesB[i], 0);
+    const sumA2 = salesA.reduce((sum, val) => sum + val * val, 0);
+    const sumB2 = salesB.reduce((sum, val) => sum + val * val, 0);
+
+    const numerator = n * sumAB - sumA * sumB;
+    const denominator = Math.sqrt((n * sumA2 - sumA * sumA) * (n * sumB2 - sumB * sumB));
+
+    return denominator === 0 ? 0 : numerator / denominator;
+  };
+
+  // Generate kit recommendations based on product correlations
+  const generateKitRecommendations = useCallback((skuData) => {
+    const recommendations = [];
+    const processedPairs = new Set();
+
+    // Only analyze top performers to reduce computation and focus on valuable kits
+    const topPerformers = skuData
+      .filter(sku => sku.isBestSeller || sku.curva === 'A')
+      .slice(0, 50); // Limit to top 50 to avoid performance issues
+
+    for (let i = 0; i < topPerformers.length; i++) {
+      for (let j = i + 1; j < topPerformers.length; j++) {
+        const productA = topPerformers[i];
+        const productB = topPerformers[j];
+        
+        const pairKey = [productA.sku, productB.sku].sort().join('|');
+        if (processedPairs.has(pairKey)) continue;
+        processedPairs.add(pairKey);
+
+        const correlation = calculateCorrelation(productA, productB);
+        
+        if (correlation >= correlationThreshold) {
+          const kitTotalSales = productA.totalGeral + productB.totalGeral;
+          const kitAvgMonthly = (productA.mediaMensal + productB.mediaMensal) / 2;
+          const kitRecommendedStock = kitAvgMonthly * 2.5;
+          
+          recommendations.push({
+            id: `kit_${recommendations.length + 1}`,
+            products: [
+              { sku: productA.sku, sales: productA.totalGeral, classification: productA.curva },
+              { sku: productB.sku, sales: productB.totalGeral, classification: productB.curva }
+            ],
+            correlation: correlation,
+            totalSales: kitTotalSales,
+            avgMonthlySales: kitAvgMonthly,
+            recommendedStock: kitRecommendedStock,
+            potential: kitTotalSales * correlation, // Potential sales impact
+            type: 'duo'
+          });
+        }
+      }
     }
-  });
+
+    // Sort by potential and return top recommendations
+    return recommendations
+      .sort((a, b) => b.potential - a.potential)
+      .slice(0, 20); // Top 20 kit recommendations
+  }, [correlationThreshold]);
+
+  // Calculate ABC classification based on cumulative sales
+  const calculateABCClassification = (skuData) => {
+    // Sort by total sales descending
+    const sortedData = [...skuData].sort((a, b) => b.totalGeral - a.totalGeral);
+    
+    const totalSales = sortedData.reduce((sum, item) => sum + item.totalGeral, 0);
+    let cumulativePercent = 0;
+    
+    return sortedData.map(item => {
+      cumulativePercent += (item.totalGeral / totalSales) * 100;
+      
+      let classification;
+      if (cumulativePercent <= 20) classification = 'A';
+      else if (cumulativePercent <= 50) classification = 'B';
+      else classification = 'C';
+      
+      return {
+        ...item,
+        curva: classification,
+        cumulativePercent: cumulativePercent
+      };
+    });
+  };
+
+  // Process raw data into comprehensive monthly format
+  const processInventoryData = useCallback((rawData) => {
+    try {
+      console.log('🔄 Processing inventory data for all months...');
+      console.log('📊 Raw data sample:', rawData?.slice(0, 3));
+      
+      // Group monthly data by SKU
+      const skuMap = new Map();
+      
+      // First, process the data using the same validation as other pages
+      const processedRawData = rawData.map(item => {
+        // Use the same validation logic as the utility functions
+        const quantity = item.QUANTIDADE;
+        let validatedQuantity = 0;
+        
+        if (quantity !== null && quantity !== undefined && quantity !== '') {
+          const quantityStr = String(quantity).trim();
+          const cleanQuantity = quantityStr.replace(/[^\d.,]/g, '');
+          const normalizedQuantity = cleanQuantity.replace(',', '.');
+          const parsedQuantity = parseFloat(normalizedQuantity);
+          validatedQuantity = isNaN(parsedQuantity) ? 0 : parsedQuantity;
+        }
+        
+        return {
+          ...item,
+          QUANTIDADE_NUM: validatedQuantity
+        };
+      });
+      
+      processedRawData.forEach(record => {
+        // Map database fields to expected format
+        const sku = record.DESCRICAO;
+        const date = new Date(record.DTEMISSAO);
+        const quantity = record.QUANTIDADE_NUM || 0;
+        
+        // Validate date
+        if (isNaN(date.getTime())) {
+          console.warn(`⚠️ Invalid date for SKU ${sku}: ${record.DTEMISSAO}`);
+          return; // Skip this record
+        }
+        
+        if (!skuMap.has(sku)) {
+          // Initialize with all 12 months
+          skuMap.set(sku, {
+            sku: sku,
+            janeiro: 0, fevereiro: 0, março: 0, abril: 0, maio: 0, junho: 0,
+            julho: 0, agosto: 0, setembro: 0, outubro: 0, novembro: 0, dezembro: 0
+          });
+        }
+        
+        const skuData = skuMap.get(sku);
+        const month = date.getMonth() + 1; // 1-based month
+        const year = date.getFullYear();
+        
+        // Process all data regardless of year to see what we have
+        console.log(`📅 Processing record: SKU=${sku}, Year=${year}, Month=${month}, Quantity=${quantity}`);
+        
+        // Map months to Portuguese names
+        switch (month) {
+          case 1: skuData.janeiro += quantity; break;
+          case 2: skuData.fevereiro += quantity; break;
+          case 3: skuData.março += quantity; break;
+          case 4: skuData.abril += quantity; break;
+          case 5: skuData.maio += quantity; break;
+          case 6: skuData.junho += quantity; break;
+          case 7: skuData.julho += quantity; break;
+          case 8: skuData.agosto += quantity; break;
+          case 9: skuData.setembro += quantity; break;
+          case 10: skuData.outubro += quantity; break;
+          case 11: skuData.novembro += quantity; break;
+          case 12: skuData.dezembro += quantity; break;
+          default: break;
+        }
+      });
+
+      // Calculate metrics for each SKU
+      const processedData = Array.from(skuMap.values()).map(sku => {
+        const salesArray = [
+          sku.janeiro, sku.fevereiro, sku.março, sku.abril, sku.maio, sku.junho,
+          sku.julho, sku.agosto, sku.setembro, sku.outubro, sku.novembro, sku.dezembro
+        ];
+        const nonZeroSales = salesArray.filter(x => x > 0);
+        
+        const totalGeral = salesArray.reduce((sum, val) => sum + val, 0);
+        const vendaMinima = nonZeroSales.length > 0 ? Math.min(...nonZeroSales) : 0;
+        const vendaMaxima = nonZeroSales.length > 0 ? Math.max(...nonZeroSales) : 0;
+        const mediaTotal = nonZeroSales.length > 0 ? totalGeral / nonZeroSales.length : 0;
+        const mediaMensal = totalGeral / 12; // Average across 12 months
+        const recomendacaoEstoque = mediaMensal * 2.5; // Slightly higher multiplier for annual data
+        
+        return {
+          ...sku,
+          totalGeral,
+          vendaMinima,
+          vendaMaxima,
+          mediaTotal,
+          mediaMensal,
+          recomendacaoEstoque,
+          isVisible: totalGeral > 0, // Show all SKUs with sales
+          monthsWithSales: nonZeroSales.length
+        };
+      });
+
+      console.log(`📊 Processed ${processedData.length} SKUs`);
+      console.log(`📈 Sample SKU data:`, processedData.slice(0, 3).map(sku => ({
+        sku: sku.sku,
+        totalGeral: sku.totalGeral,
+        monthsWithSales: sku.monthsWithSales,
+        sampleMonths: {
+          janeiro: sku.janeiro,
+          fevereiro: sku.fevereiro,
+          março: sku.março
+        }
+      })));
+      
+      // Check if any SKUs have sales
+      const skusWithSales = processedData.filter(sku => sku.totalGeral > 0);
+      console.log(`📊 SKUs with sales: ${skusWithSales.length} out of ${processedData.length}`);
+      
+      if (skusWithSales.length === 0) {
+        console.error('❌ No SKUs with sales found!');
+        console.log('🔍 First few processed SKUs:', processedData.slice(0, 5));
+        
+        // Let's check the raw data quantities
+        const totalQuantity = processedRawData.reduce((sum, record) => sum + (record.QUANTIDADE_NUM || 0), 0);
+        console.log(`🔍 Total quantity in raw data: ${totalQuantity}`);
+        console.log(`🔍 Sample quantities:`, processedRawData.slice(0, 10).map(r => ({ sku: r.DESCRICAO, quantity: r.QUANTIDADE_NUM, original: r.QUANTIDADE })));
+      }
+
+      // Filter out SKUs with no sales and calculate ABC classification
+      const activeSkus = processedData.filter(sku => sku.totalGeral > 0);
+      const classifiedData = calculateABCClassification(activeSkus);
+      
+      // Determine "best sellers" and visibility
+      const sortedByTotal = [...classifiedData].sort((a, b) => b.totalGeral - a.totalGeral);
+      const bestSellerThreshold = Math.ceil(sortedByTotal.length * 0.2); // Top 20% are best sellers
+      const visibleThreshold = Math.ceil(sortedByTotal.length * 0.3); // Top 30% are visible by default
+      
+      sortedByTotal.forEach((item, index) => {
+        item.isBestSeller = index < bestSellerThreshold;
+        item.isVisible = index < visibleThreshold;
+        item.rank = index + 1;
+      });
+
+      console.log(`✅ Processed ${classifiedData.length} SKUs, ${bestSellerThreshold} best sellers, ${visibleThreshold} visible`);
+      
+      // Generate kit recommendations based on correlations
+      const kits = generateKitRecommendations(classifiedData);
+      setKitRecommendations(kits);
+      console.log(`🎯 Generated ${kits.length} kit recommendations`);
+      
+      return classifiedData;
+      
+    } catch (err) {
+      console.error('❌ Error processing data:', err);
+      throw new Error('Erro ao processar dados de estoque');
+    }
+  }, [generateKitRecommendations]);
 
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       
-      console.log('🔄 Loading inventory forecast data...');
+      console.log('🔄 Loading inventory analysis data...');
       
-      const [monthlyData, orderData] = await Promise.all([
-        fetchMonthlySalesBySKU(config.analysisWindow),
-        fetchOrderLevelData(config.analysisWindow)
-      ]);
+      const rawData = await fetchConcremData();
       
-      const forecastResult = await calculateInventoryForecast(monthlyData, orderData, config);
-      setForecast(forecastResult);
+      console.log(`📊 Raw data received: ${rawData?.length || 0} records`);
       
-      console.log('✅ Inventory forecast data loaded successfully');
+      if (!rawData || rawData.length === 0) {
+        throw new Error('Nenhum dado de vendas encontrado no banco de dados');
+      }
+      
+      // Validate data quality first
+      const dataQuality = validateDataQuality(rawData);
+      console.log('📊 Data quality report:', dataQuality);
+      
+      // Use the same approach as other pages - get product analysis first
+      const productAnalysis = calculateProductAnalysis(rawData);
+      console.log('📊 Product analysis:', productAnalysis);
+      
+      if (!productAnalysis.data || productAnalysis.data.length === 0) {
+        throw new Error('Nenhum produto com vendas encontrado');
+      }
+      
+      // Now process the data for inventory analysis using the validated data
+      const processedData = processInventoryData(rawData);
+      
+      if (processedData.length === 0) {
+        throw new Error('Nenhum SKU com vendas encontrado após processamento');
+      }
+      
+      setData(processedData);
+      
+      console.log('✅ Inventory analysis data loaded successfully');
     } catch (err) {
       console.error('❌ Error loading data:', err);
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [config]);
+  }, [processInventoryData]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
-  const handleSort = (key) => {
-    setSortConfig(prev => ({
-      key,
-      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
-    }));
-  };
-
-  const toggleRowExpansion = (sku) => {
-    const newExpanded = new Set(expandedRows);
-    if (newExpanded.has(sku)) {
-      newExpanded.delete(sku);
-    } else {
-      newExpanded.add(sku);
+  // Regenerate kit recommendations when correlation threshold changes
+  useEffect(() => {
+    if (data.length > 0) {
+      const kits = generateKitRecommendations(data);
+      setKitRecommendations(kits);
+      console.log(`🎯 Regenerated ${kits.length} kit recommendations with ${correlationThreshold} threshold`);
     }
-    setExpandedRows(newExpanded);
-  };
+  }, [correlationThreshold, data, generateKitRecommendations]);
 
-  const filteredAndSortedData = () => {
-    if (!forecast?.skuMetrics) return [];
-    
-    let filtered = forecast.skuMetrics.filter(sku => {
-      const matchesSearch = sku.sku.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesClassification = selectedClassification === 'all' || sku.classification === selectedClassification;
-      return matchesSearch && matchesClassification;
+  const filteredData = useMemo(() => {
+    let filtered = data.filter(item => {
+      const matchesSearch = item.sku.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesClass = selectedClass === 'all' || item.curva === selectedClass;
+      const matchesVisibility = !showOnlyVisible || item.isVisible;
+      const matchesBestSellers = !showBestSellers || item.isBestSeller;
+      return matchesSearch && matchesClass && matchesVisibility && matchesBestSellers;
     });
 
+    // Sort data
     filtered.sort((a, b) => {
       const aValue = a[sortConfig.key];
       const bValue = b[sortConfig.key];
@@ -93,6 +359,29 @@ const InventoryForecast = () => {
     });
 
     return filtered;
+  }, [data, searchTerm, selectedClass, showOnlyVisible, showBestSellers, sortConfig]);
+
+  const summary = useMemo(() => {
+    const visibleData = data.filter(item => (!showOnlyVisible || item.isVisible) && (!showBestSellers || item.isBestSeller));
+    const bestSellersData = data.filter(item => item.isBestSeller);
+    
+    return {
+      totalSKUs: data.length,
+      visibleSKUs: visibleData.length,
+      bestSellers: bestSellersData.length,
+      classA: visibleData.filter(item => item.curva === 'A').length,
+      classB: visibleData.filter(item => item.curva === 'B').length,
+      classC: visibleData.filter(item => item.curva === 'C').length,
+      totalSales: visibleData.reduce((sum, item) => sum + item.totalGeral, 0),
+      averageRecommendation: visibleData.reduce((sum, item) => sum + item.recomendacaoEstoque, 0) / (visibleData.length || 1)
+    };
+  }, [data, showOnlyVisible, showBestSellers]);
+
+  const handleSort = (key) => {
+    setSortConfig(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
   };
 
   const getClassificationColor = (classification) => {
@@ -113,150 +402,64 @@ const InventoryForecast = () => {
     }
   };
 
-  // Calculate additional metrics for each SKU
-  const calculateSKUMetrics = (sku) => {
-    // Demand & Sales metrics
-    const turnoverRatio = sku.totalGeral / (sku.recomendacaoEstoque || 1);
-    const dsi = 365 / (turnoverRatio || 1);
-    const demandVariation = sku.monthlyData ? 
-      Math.sqrt(sku.monthlyData.reduce((sum, month) => sum + Math.pow(month.value - sku.mediaMensal, 2), 0) / sku.monthlyData.length) / sku.mediaMensal : 0;
-    const salesTrend = sku.monthlyData && sku.monthlyData.length >= 2 ? 
-      ((sku.monthlyData[sku.monthlyData.length - 1].value - sku.monthlyData[0].value) / sku.monthlyData[0].value) * 100 : 0;
-
-    // Profitability metrics (mock data - replace with actual data)
-    const grossMargin = 0.25 + (Math.random() * 0.3); // 25-55% margin
-    const gmroii = (sku.totalGeral * grossMargin) / (sku.recomendacaoEstoque * 100); // Mock calculation
-    const contributionMargin = sku.totalGeral * grossMargin;
-
-    // Inventory Risk metrics
-    const stockoutRate = Math.max(0, 1 - (sku.recomendacaoEstoque / (sku.mediaMensal * 2))); // Mock calculation
-    const serviceLevel = Math.max(0, 1 - stockoutRate);
-    const reorderPoint = sku.mediaMensal * 1.5; // 1.5 months of average demand
-    const safetyStock = sku.mediaMensal * 0.5; // 0.5 months as safety stock
-
-    // Classification alternatives
-    const xyzClassification = demandVariation < 0.2 ? 'X' : demandVariation < 0.5 ? 'Y' : 'Z';
-    const fsnClassification = turnoverRatio > 3 ? 'F' : turnoverRatio > 1 ? 'S' : 'N';
-    const vedClassification = sku.totalGeral > 5000 ? 'V' : sku.totalGeral > 2000 ? 'E' : 'D';
-
-    return {
-      turnoverRatio: turnoverRatio.toFixed(2),
-      dsi: dsi.toFixed(1),
-      demandVariation: (demandVariation * 100).toFixed(1),
-      salesTrend: salesTrend.toFixed(1),
-      grossMargin: (grossMargin * 100).toFixed(1),
-      gmroii: gmroii.toFixed(2),
-      contributionMargin: contributionMargin.toFixed(0),
-      stockoutRate: (stockoutRate * 100).toFixed(1),
-      serviceLevel: (serviceLevel * 100).toFixed(1),
-      reorderPoint: reorderPoint.toFixed(0),
-      safetyStock: safetyStock.toFixed(0),
-      xyzClassification,
-      fsnClassification,
-      vedClassification
-    };
-  };
-
   const exportToCSV = () => {
-    if (!forecast?.skuMetrics) return;
-    
+    // Main inventory data
     const headers = [
-      'SKU', 'Classificacao', 'Total_Geral', 'Venda_Minima', 'Venda_Maxima',
-      'Media_Total', 'Media_Mensal', 'Cobertura', 'Recomendacao_Base',
-      'Previsao_Ajustada', 'Rank', 'Taxa_Rotacao', 'Dias_Estoque', 'Variacao_Demanda',
-      'Tendencia_Vendas', 'Margem_Bruta', 'GMROII', 'Margem_Contribuicao',
-      'Taxa_Ruptura', 'Nivel_Servico', 'Ponto_Reposicao', 'Estoque_Seguranca',
-      'Classificacao_XYZ', 'Classificacao_FSN', 'Classificacao_VED'
+      'SKU', 'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+      'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
+      'Total_Geral', 'Venda_Minima', 'Venda_Maxima', 'Media_Total', 
+      'Media_Mensal', 'Recomendacao_Estoque', 'Curva', 'Rank', 'Meses_Com_Vendas', 'Best_Seller'
     ];
     
-    // Helper function to properly escape CSV values with UTF-8 BOM
-    const escapeCSV = (value) => {
-      if (value === null || value === undefined) return '';
-      const stringValue = String(value);
-      // If the value contains comma, semicolon, quote, or newline, wrap it in quotes
-      if (stringValue.includes(',') || stringValue.includes(';') || stringValue.includes('"') || stringValue.includes('\n')) {
-        // Escape any existing quotes by doubling them
-        return `"${stringValue.replace(/"/g, '""')}"`;
-      }
-      return stringValue;
-    };
-    
     const csvContent = [
-      headers.map(escapeCSV).join(';'),
-      ...forecast.skuMetrics.map(sku => {
-        const metrics = calculateSKUMetrics(sku);
-        return [
-          escapeCSV(sku.sku),
-          escapeCSV(sku.classification),
-          escapeCSV(sku.totalGeral),
-          escapeCSV(sku.vendaMinima),
-          escapeCSV(sku.vendaMaxima),
-          escapeCSV(sku.mediaTotal.toFixed(2)),
-          escapeCSV(sku.mediaMensal.toFixed(2)),
-          escapeCSV(sku.cobertura),
-          escapeCSV(sku.recomendacaoEstoque),
-          escapeCSV(sku.forecastAjustada),
-          escapeCSV(sku.rank),
-          escapeCSV(metrics.turnoverRatio),
-          escapeCSV(metrics.dsi),
-          escapeCSV(metrics.demandVariation),
-          escapeCSV(metrics.salesTrend),
-          escapeCSV(metrics.grossMargin),
-          escapeCSV(metrics.gmroii),
-          escapeCSV(metrics.contributionMargin),
-          escapeCSV(metrics.stockoutRate),
-          escapeCSV(metrics.serviceLevel),
-          escapeCSV(metrics.reorderPoint),
-          escapeCSV(metrics.safetyStock),
-          escapeCSV(metrics.xyzClassification),
-          escapeCSV(metrics.fsnClassification),
-          escapeCSV(metrics.vedClassification)
-        ].join(';');
-      })
+      '=== ANÁLISE DE ESTOQUE ===',
+      headers.join(';'),
+      ...filteredData.map(item => [
+        `"${item.sku}"`,
+        item.janeiro, item.fevereiro, item.março, item.abril, item.maio, item.junho,
+        item.julho, item.agosto, item.setembro, item.outubro, item.novembro, item.dezembro,
+        item.totalGeral,
+        item.vendaMinima,
+        item.vendaMaxima,
+        item.mediaTotal.toFixed(2),
+        item.mediaMensal.toFixed(2),
+        item.recomendacaoEstoque.toFixed(0),
+        item.curva,
+        item.rank,
+        item.monthsWithSales,
+        item.isBestSeller ? 'Sim' : 'Não'
+      ].join(';')),
+      '',
+      '=== RECOMENDAÇÕES DE KITS ===',
+      'Kit_ID;Produto_1;Produto_2;Correlacao;Vendas_Combinadas;Estoque_Recomendado;Potencial_Vendas',
+      ...kitRecommendations.map(kit => [
+        kit.id,
+        `"${kit.products[0].sku}"`,
+        `"${kit.products[1].sku}"`,
+        (kit.correlation * 100).toFixed(1) + '%',
+        kit.totalSales,
+        Math.round(kit.recommendedStock),
+        Math.round(kit.potential)
+      ].join(';'))
     ].join('\n');
     
-    // Add UTF-8 BOM to ensure proper encoding
     const BOM = '\uFEFF';
     const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `inventory_forecast_${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `estoque_analise_com_kits_${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
     window.URL.revokeObjectURL(url);
   };
 
   if (loading) {
     return (
-      <div style={{ 
-        minHeight: '100vh', 
-        background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
-        padding: '32px'
-      }}>
-        <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-          <div style={{ 
-            display: 'flex', 
-            alignItems: 'center', 
-            justifyContent: 'center', 
-            height: '400px' 
-          }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '64px',
-                height: '64px',
-                border: '4px solid #3b82f6',
-                borderTop: '4px solid transparent',
-                borderRadius: '50%',
-                animation: 'spin 1s linear infinite',
-                margin: '0 auto 24px'
-              }}></div>
-              <p style={{ fontSize: '18px', color: '#374151', fontWeight: '500' }}>
-                Carregando dados de previsão de estoque...
-              </p>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginTop: '8px' }}>
-                Isso pode levar alguns segundos
-              </p>
-            </div>
+      <div className="section">
+        <div className="container">
+          <div className="loading">
+            <div className="spinner"></div>
+            <span style={{ marginLeft: 'var(--spacing-md)' }}>Carregando análise de estoque...</span>
           </div>
         </div>
       </div>
@@ -265,430 +468,273 @@ const InventoryForecast = () => {
 
   if (error) {
     return (
-      <div style={{ 
-        minHeight: '100vh', 
-        background: 'linear-gradient(135deg, #fef2f2 0%, #fce7f3 100%)',
-        padding: '32px'
-      }}>
-        <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-          <div className="card" style={{ maxWidth: '600px', margin: '0 auto' }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '64px',
-                height: '64px',
-                background: '#fee2e2',
-                borderRadius: '50%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 16px'
-              }}>
-                <X style={{ width: '32px', height: '32px', color: '#dc2626' }} />
-              </div>
-              <h3 style={{ fontSize: '20px', fontWeight: '600', color: '#991b1b', marginBottom: '8px' }}>
-                Erro ao carregar dados
-              </h3>
-              <p style={{ color: '#dc2626', marginBottom: '24px' }}>{error}</p>
-              <button
-                onClick={loadData}
-                className="btn btn-primary"
-              >
-                Tentar novamente
-              </button>
-            </div>
+      <div className="section">
+        <div className="container">
+          <div className="card" style={{ textAlign: 'center', color: '#EF4444', padding: 'var(--spacing-xl)' }}>
+            <h3 style={{ fontSize: '1.5rem', marginBottom: 'var(--spacing-md)' }}>Erro ao carregar dados</h3>
+            <p style={{ fontSize: '1rem' }}>{error}</p>
+            <button
+              onClick={loadData}
+              className="btn btn-primary"
+              style={{ marginTop: 'var(--spacing-md)' }}
+            >
+              Tentar novamente
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
-  const filteredData = filteredAndSortedData();
-  const summary = forecast?.summary;
-
   return (
-    <div style={{ 
-      minHeight: '100vh', 
-      background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 50%, #f0f9ff 100%)'
-    }}>
-      {/* Header */}
-      <div style={{
-        background: 'rgba(255, 255, 255, 0.9)',
-        backdropFilter: 'blur(10px)',
-        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
-        borderBottom: '1px solid #e5e7eb',
-        position: 'sticky',
-        top: 0,
-        zIndex: 10
-      }}>
-        <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '0 24px' }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            height: '80px'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-              <div style={{
-                width: '48px',
-                height: '48px',
-                background: 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)',
-                borderRadius: '12px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-              }}>
-                <TrendingUp style={{ width: '24px', height: '24px', color: 'white' }} />
-              </div>
-              <div>
-                <h1 style={{ fontSize: '24px', fontWeight: '700', color: '#111827' }}>
-                  Previsão de Estoque
-                </h1>
-                <p style={{ fontSize: '14px', color: '#6b7280' }}>
-                  Análise ABC com indicadores avançados
-                </p>
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <button
-                onClick={() => setShowSettings(!showSettings)}
-                className="btn btn-secondary"
-                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-              >
-                <Settings style={{ width: '16px', height: '16px' }} />
-                Configurações
-              </button>
-              <button
-                onClick={exportToCSV}
-                className="btn btn-primary"
-                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-              >
-                <Download style={{ width: '16px', height: '16px' }} />
-                Exportar CSV
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '32px 24px' }}>
-        {/* Settings Panel */}
-        {showSettings && (
-          <div className="card" style={{ marginBottom: '32px' }}>
+    <div className="section">
+      <div className="container">
+        {/* Header */}
+        <div style={{ marginBottom: 'var(--spacing-2xl)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
             <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: 'var(--forest-green)',
+              borderRadius: 'var(--radius-lg)',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between',
-              marginBottom: '24px'
+              justifyContent: 'center',
+              marginRight: 'var(--spacing-md)'
             }}>
-              <h3 style={{ fontSize: '20px', fontWeight: '600', color: '#111827' }}>
-                Configurações de Análise
-              </h3>
-              <button
-                onClick={() => setShowSettings(false)}
-                style={{ color: '#9ca3af', cursor: 'pointer' }}
-              >
-                <X style={{ width: '24px', height: '24px' }} />
-              </button>
+              <BarChart3 style={{ width: '24px', height: '24px', color: 'white' }} />
             </div>
-            
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-              gap: '24px'
-            }}>
-              <div>
-                <label style={{
-                  display: 'block',
-                  fontSize: '14px',
-                  fontWeight: '500',
-                  color: '#374151',
-                  marginBottom: '12px'
-                }}>
-                  Janela de Análise (meses)
-                </label>
-                <input
-                  type="number"
-                  min="3"
-                  max="12"
-                  value={config.analysisWindow}
-                  onChange={(e) => setConfig(prev => ({ ...prev, analysisWindow: parseInt(e.target.value) }))}
-                  style={{
-                    width: '100%',
-                    padding: '12px 16px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '8px',
-                    fontSize: '14px'
-                  }}
-                />
-              </div>
-              
-              <div>
-                <label style={{
-                  display: 'block',
-                  fontSize: '14px',
-                  fontWeight: '500',
-                  color: '#374151',
-                  marginBottom: '12px'
-                }}>
-                  Limite Correlação
-                </label>
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  max="1"
-                  value={config.associationConfig.correlationThreshold}
-                  onChange={(e) => setConfig(prev => ({
-                    ...prev,
-                    associationConfig: {
-                      ...prev.associationConfig,
-                      correlationThreshold: parseFloat(e.target.value)
-                    }
-                  }))}
-                  style={{
-                    width: '100%',
-                    padding: '12px 16px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '8px',
-                    fontSize: '14px'
-                  }}
-                />
-              </div>
-              
-              <div>
-                <label style={{
-                  display: 'block',
-                  fontSize: '14px',
-                  fontWeight: '500',
-                  color: '#374151',
-                  marginBottom: '12px'
-                }}>
-                  Fator de Ajuste (α)
-                </label>
-                <input
-                  type="number"
-                  step="0.05"
-                  min="0"
-                  max="1"
-                  value={config.associationConfig.alpha}
-                  onChange={(e) => setConfig(prev => ({
-                    ...prev,
-                    associationConfig: {
-                      ...prev.associationConfig,
-                      alpha: parseFloat(e.target.value)
-                    }
-                  }))}
-                  style={{
-                    width: '100%',
-                    padding: '12px 16px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '8px',
-                    fontSize: '14px'
-                  }}
-                />
-              </div>
-              
-              <div style={{ display: 'flex', alignItems: 'center' }}>
-                <button
-                  onClick={() => setShowPatternAdjustments(!showPatternAdjustments)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    padding: '12px 24px',
-                    borderRadius: '8px',
-                    border: '1px solid',
-                    fontWeight: '500',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s',
-                    ...(showPatternAdjustments ? {
-                      background: '#dbeafe',
-                      color: '#1d4ed8',
-                      borderColor: '#93c5fd'
-                    } : {
-                      background: '#f3f4f6',
-                      color: '#374151',
-                      borderColor: '#d1d5db'
-                    })
-                  }}
-                >
-                  {showPatternAdjustments ? <Eye style={{ width: '16px', height: '16px' }} /> : <EyeOff style={{ width: '16px', height: '16px' }} />}
-                  Ajustes de Padrão
-                </button>
-              </div>
+            <div>
+              <h1 style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                Análise de Estoque
+              </h1>
+              <p style={{ fontSize: '1rem', color: '#6b7280' }}>
+                Análise completa de vendas mensais com recomendações de kits
+              </p>
             </div>
           </div>
-        )}
+
+          {/* Controls */}
+          <div style={{ display: 'flex', gap: 'var(--spacing-md)', flexWrap: 'wrap', alignItems: 'center' }}>
+
+            <button
+              onClick={() => setShowBestSellers(!showBestSellers)}
+              className="btn"
+              style={{
+                backgroundColor: showBestSellers ? 'var(--orange)' : '#f3f4f6',
+                color: showBestSellers ? 'white' : 'var(--charcoal-black)'
+              }}
+            >
+              <Star style={{ width: '16px', height: '16px', marginRight: 'var(--spacing-xs)' }} />
+              {showBestSellers ? 'Best Sellers' : 'Todos Produtos'}
+            </button>
+
+            <button
+              onClick={() => setShowOnlyVisible(!showOnlyVisible)}
+              className="btn"
+              style={{
+                backgroundColor: showOnlyVisible ? 'var(--blue)' : '#f3f4f6',
+                color: showOnlyVisible ? 'white' : 'var(--charcoal-black)'
+              }}
+            >
+              {showOnlyVisible ? <Eye style={{ width: '16px', height: '16px', marginRight: 'var(--spacing-xs)' }} /> : <EyeOff style={{ width: '16px', height: '16px', marginRight: 'var(--spacing-xs)' }} />}
+              Top Performers
+            </button>
+
+            <button
+              onClick={exportToCSV}
+              className="btn btn-primary"
+            >
+              <Download style={{ width: '16px', height: '16px', marginRight: 'var(--spacing-xs)' }} />
+              Exportar CSV
+            </button>
+          </div>
+        </div>
 
         {/* Summary Cards */}
-        {summary && (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-            gap: '24px',
-            marginBottom: '32px'
-          }}>
-            <div className="card" style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '48px',
-                height: '48px',
-                background: 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)',
-                borderRadius: '12px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 16px'
-              }}>
-                <Package style={{ width: '24px', height: '24px', color: 'white' }} />
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>Total SKUs</p>
-              <p style={{ fontSize: '32px', fontWeight: '700', color: '#111827' }}>{summary.totalSKUs}</p>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+          gap: 'var(--spacing-lg)',
+          marginBottom: 'var(--spacing-2xl)'
+        }}>
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: 'var(--blue)',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Package style={{ width: '24px', height: '24px', color: 'white' }} />
             </div>
-            
-            <div className="card" style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '48px',
-                height: '48px',
-                background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
-                borderRadius: '12px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 16px'
-              }}>
-                <Target style={{ width: '24px', height: '24px', color: 'white' }} />
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>Classe A</p>
-              <p style={{ fontSize: '32px', fontWeight: '700', color: '#111827' }}>{summary.classA}</p>
-            </div>
-            
-            <div className="card" style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '48px',
-                height: '48px',
-                background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
-                borderRadius: '12px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 16px'
-              }}>
-                <Target style={{ width: '24px', height: '24px', color: 'white' }} />
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>Classe B</p>
-              <p style={{ fontSize: '32px', fontWeight: '700', color: '#111827' }}>{summary.classB}</p>
-            </div>
-            
-            <div className="card" style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '48px',
-                height: '48px',
-                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                borderRadius: '12px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 16px'
-              }}>
-                <Target style={{ width: '24px', height: '24px', color: 'white' }} />
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>Classe C</p>
-              <p style={{ fontSize: '32px', fontWeight: '700', color: '#111827' }}>{summary.classC}</p>
-            </div>
-            
-            <div className="card" style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '48px',
-                height: '48px',
-                background: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
-                borderRadius: '12px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 16px'
-              }}>
-                <Zap style={{ width: '24px', height: '24px', color: 'white' }} />
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>Média Recomendação</p>
-              <p style={{ fontSize: '32px', fontWeight: '700', color: '#111827' }}>{Math.round(summary.averageRecommendation)}</p>
-            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Total SKUs</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--charcoal-black)' }}>{summary.totalSKUs}</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>({summary.visibleSKUs} exibidos)</p>
           </div>
-        )}
+
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: 'var(--orange)',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Star style={{ width: '24px', height: '24px', color: 'white' }} />
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Best Sellers</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--orange)' }}>{summary.bestSellers}</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>Top 20% vendas</p>
+          </div>
+
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: 'var(--teal)',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Package style={{ width: '24px', height: '24px', color: 'white' }} />
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Kits Recomendados</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--teal)' }}>{kitRecommendations.length}</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>≥{(correlationThreshold * 100).toFixed(0)}% correlação</p>
+          </div>
+
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: '#ef4444',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Target style={{ width: '24px', height: '24px', color: 'white' }} />
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Classe A</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: '#ef4444' }}>{summary.classA}</p>
+          </div>
+
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: '#f59e0b',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Target style={{ width: '24px', height: '24px', color: 'white' }} />
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Classe B</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>{summary.classB}</p>
+          </div>
+
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: '#10b981',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Target style={{ width: '24px', height: '24px', color: 'white' }} />
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Classe C</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: '#10b981' }}>{summary.classC}</p>
+          </div>
+        </div>
 
         {/* Charts */}
-        {forecast && (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(500px, 1fr))',
-            gap: '32px',
-            marginBottom: '32px'
-          }}>
-            <div className="card">
-              <h3 style={{ fontSize: '20px', fontWeight: '600', color: '#111827', marginBottom: '24px' }}>
-                Distribuição ABC
-              </h3>
-              <ResponsiveContainer width="100%" height={350}>
-                <PieChart>
-                  <Pie
-                    data={[
-                      { name: 'Classe A', value: summary.classA, color: '#ef4444' },
-                      { name: 'Classe B', value: summary.classB, color: '#f59e0b' },
-                      { name: 'Classe C', value: summary.classC, color: '#10b981' }
-                    ]}
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={100}
-                    dataKey="value"
-                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                  >
-                    {[
-                      { name: 'Classe A', value: summary.classA, color: '#ef4444' },
-                      { name: 'Classe B', value: summary.classB, color: '#f59e0b' },
-                      { name: 'Classe C', value: summary.classC, color: '#10b981' }
-                    ].map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="card">
-              <h3 style={{ fontSize: '20px', fontWeight: '600', color: '#111827', marginBottom: '24px' }}>
-                Top 10 SKUs por Vendas Totais
-              </h3>
-              <ResponsiveContainer width="100%" height={350}>
-                <BarChart data={filteredData.slice(0, 10)}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                  <XAxis dataKey="sku" angle={-45} textAnchor="end" height={100} tick={{ fontSize: 12 }} />
-                  <YAxis tick={{ fontSize: 12 }} />
-                  <Tooltip formatter={(value) => formatNumber(value)} />
-                  <Bar dataKey="totalGeral" fill="url(#blueGradient)" radius={[4, 4, 0, 0]} />
-                  <defs>
-                    <linearGradient id="blueGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#3b82f6" />
-                      <stop offset="100%" stopColor="#1d4ed8" />
-                    </linearGradient>
-                  </defs>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
+          gap: 'var(--spacing-2xl)',
+          marginBottom: 'var(--spacing-2xl)'
+        }}>
+          <div className="card">
+            <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-lg)' }}>
+              Distribuição ABC {showBestSellers ? '(Best Sellers)' : '(Todos)'}
+            </h3>
+            <ResponsiveContainer width="100%" height={300}>
+              <PieChart>
+                <Pie
+                  data={[
+                    { name: 'Classe A', value: summary.classA, color: '#ef4444' },
+                    { name: 'Classe B', value: summary.classB, color: '#f59e0b' },
+                    { name: 'Classe C', value: summary.classC, color: '#10b981' }
+                  ]}
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={100}
+                  dataKey="value"
+                  label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                >
+                  {[
+                    { name: 'Classe A', value: summary.classA, color: '#ef4444' },
+                    { name: 'Classe B', value: summary.classB, color: '#f59e0b' },
+                    { name: 'Classe C', value: summary.classC, color: '#10b981' }
+                  ].map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
           </div>
-        )}
+
+          <div className="card">
+            <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-lg)' }}>
+              Top 8 SKUs por Vendas Totais
+            </h3>
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={filteredData.slice(0, 8)}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                <XAxis 
+                  dataKey="sku" 
+                  angle={-45} 
+                  textAnchor="end" 
+                  height={80} 
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(value) => value.substring(0, 20) + '...'}
+                />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip 
+                  formatter={(value) => [value.toLocaleString(), 'Total Geral']}
+                  labelFormatter={(label) => `SKU: ${label}`}
+                />
+                <Bar dataKey="totalGeral" fill="var(--forest-green)" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
 
         {/* Filters */}
-        <div className="card" style={{ marginBottom: '32px' }}>
-          <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '16px'
-          }}>
-            <div style={{ position: 'relative', flex: 1 }}>
+        <div className="card" style={{ marginBottom: 'var(--spacing-2xl)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+            <div style={{ position: 'relative' }}>
               <Search style={{
                 position: 'absolute',
-                left: '16px',
+                left: 'var(--spacing-md)',
                 top: '50%',
                 transform: 'translateY(-50%)',
                 width: '20px',
@@ -702,24 +748,21 @@ const InventoryForecast = () => {
                 onChange={(e) => setSearchTerm(e.target.value)}
                 style={{
                   width: '100%',
-                  padding: '12px 16px 12px 48px',
+                  padding: 'var(--spacing-md) var(--spacing-md) var(--spacing-md) calc(var(--spacing-md) * 3)',
                   border: '1px solid #d1d5db',
-                  borderRadius: '8px',
-                  fontSize: '14px'
+                  borderRadius: 'var(--radius-lg)',
+                  fontSize: '1rem',
+                  background: '#ffffff'
                 }}
               />
             </div>
             
-            <div style={{ display: 'flex', gap: '12px' }}>
+            <div style={{ display: 'flex', gap: 'var(--spacing-md)', flexWrap: 'wrap' }}>
               <select
-                value={selectedClassification}
-                onChange={(e) => setSelectedClassification(e.target.value)}
-                style={{
-                  padding: '12px 16px',
-                  border: '1px solid #d1d5db',
-                  borderRadius: '8px',
-                  fontSize: '14px'
-                }}
+                value={selectedClass}
+                onChange={(e) => setSelectedClass(e.target.value)}
+                className="btn btn-secondary"
+                style={{ padding: 'var(--spacing-sm) var(--spacing-md)' }}
               >
                 <option value="all">Todas as Classes</option>
                 <option value="A">Classe A</option>
@@ -730,340 +773,405 @@ const InventoryForecast = () => {
               <select
                 value={sortConfig.key}
                 onChange={(e) => handleSort(e.target.value)}
-                style={{
-                  padding: '12px 16px',
-                  border: '1px solid #d1d5db',
-                  borderRadius: '8px',
-                  fontSize: '14px'
-                }}
+                className="btn btn-secondary"
+                style={{ padding: 'var(--spacing-sm) var(--spacing-md)' }}
               >
                 <option value="totalGeral">Ordenar por Total Geral</option>
                 <option value="recomendacaoEstoque">Ordenar por Recomendação</option>
-                <option value="forecastAjustada">Ordenar por Previsão Ajustada</option>
-                <option value="rank">Ordenar por Rank</option>
+                <option value="mediaTotal">Ordenar por Média Total</option>
+                <option value="rank">Ordenar por Ranking</option>
+                <option value="sku">Ordenar por SKU</option>
               </select>
+              
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--spacing-xs)',
+                padding: 'var(--spacing-sm) var(--spacing-md)',
+                background: '#f1f5f9',
+                borderRadius: 'var(--radius-lg)',
+                fontSize: '0.875rem',
+                color: '#64748b'
+              }}>
+                <Filter style={{ width: '16px', height: '16px' }} />
+                {filteredData.length} de {summary.visibleSKUs} itens
+                {showBestSellers && <span style={{ color: 'var(--orange)', fontWeight: '500' }}>• Best Sellers</span>}
+              </div>
             </div>
           </div>
         </div>
 
-        {/* SKU Indicators Grid */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
-          gap: '24px',
-          marginBottom: '32px'
-        }}>
-          {filteredData.map((sku) => {
-            const metrics = calculateSKUMetrics(sku);
-            return (
-              <div key={sku.sku} className="card" style={{ position: 'relative' }}>
-                {/* SKU Header */}
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'flex-start',
-                  marginBottom: '20px',
-                  paddingBottom: '16px',
-                  borderBottom: '1px solid #e5e7eb'
-                }}>
-                  <div style={{ flex: 1 }}>
-                    <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '4px' }}>
-                      {sku.sku}
-                    </h3>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        {/* Kit Recommendations */}
+        <div className="card" style={{ marginBottom: 'var(--spacing-2xl)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-lg)' }}>
+            <div>
+              <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                🎯 Recomendações de Kits
+              </h3>
+              <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                Produtos com alta correlação de vendas - ideais para kits promocionais
+              </p>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
+              <label style={{ fontSize: '0.875rem', color: '#374151', fontWeight: '500' }}>
+                Correlação Mínima:
+              </label>
+              <select
+                value={correlationThreshold}
+                onChange={(e) => setCorrelationThreshold(parseFloat(e.target.value))}
+                className="btn btn-secondary"
+                style={{ padding: 'var(--spacing-sm) var(--spacing-md)' }}
+              >
+                <option value={0.5}>50%</option>
+                <option value={0.6}>60%</option>
+                <option value={0.7}>70%</option>
+                <option value={0.8}>80%</option>
+                <option value={0.9}>90%</option>
+              </select>
+            </div>
+          </div>
+
+          {kitRecommendations.length > 0 ? (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))',
+              gap: 'var(--spacing-lg)'
+            }}>
+              {kitRecommendations.slice(0, 12).map((kit, index) => (
+                <div 
+                  key={kit.id} 
+                  className="card"
+                  style={{ cursor: 'pointer', transition: 'all 0.2s' }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                    e.currentTarget.style.boxShadow = 'var(--shadow-lg)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = 'var(--shadow-md)';
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-md)' }}>
+                    <div style={{
+                      background: 'var(--forest-green)',
+                      color: 'white',
+                      padding: 'var(--spacing-xs) var(--spacing-md)',
+                      borderRadius: '20px',
+                      fontSize: '0.75rem',
+                      fontWeight: '600'
+                    }}>
+                      Kit #{index + 1}
+                    </div>
+                    <div style={{
+                      background: kit.correlation >= 0.8 ? '#dcfce7' : kit.correlation >= 0.7 ? '#fef3c7' : '#fee2e2',
+                      color: kit.correlation >= 0.8 ? '#166534' : kit.correlation >= 0.7 ? '#92400e' : '#991b1b',
+                      padding: 'var(--spacing-xs) var(--spacing-sm)',
+                      borderRadius: 'var(--radius-md)',
+                      fontSize: '0.75rem',
+                      fontWeight: '600'
+                    }}>
+                      {(kit.correlation * 100).toFixed(0)}% correlação
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                    {kit.products.map((product, productIndex) => (
+                      <div key={productIndex} style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: 'var(--spacing-sm) 0',
+                        borderBottom: productIndex < kit.products.length - 1 ? '1px solid #f1f5f9' : 'none'
+                      }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                            {product.sku.length > 40 ? product.sku.substring(0, 40) + '...' : product.sku}
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                            {product.sales.toLocaleString()} vendas
+                          </div>
+                        </div>
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: '24px',
+                          height: '24px',
+                          borderRadius: '50%',
+                          fontSize: '0.75rem',
+                          fontWeight: '600',
+                          backgroundColor: getClassificationBgColor(product.classification),
+                          color: getClassificationColor(product.classification)
+                        }}>
+                          {product.classification}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: 'var(--spacing-md)',
+                    padding: 'var(--spacing-md)',
+                    background: '#f8fafc',
+                    borderRadius: 'var(--radius-lg)'
+                  }}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '0.75rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Vendas Combinadas</div>
+                      <div style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--charcoal-black)' }}>
+                        {kit.totalSales.toLocaleString()}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '0.75rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Estoque Recomendado</div>
+                      <div style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--purple)' }}>
+                        {Math.round(kit.recommendedStock).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{
+                    marginTop: 'var(--spacing-md)',
+                    padding: 'var(--spacing-sm) var(--spacing-md)',
+                    background: 'var(--blue)',
+                    borderRadius: 'var(--radius-lg)',
+                    textAlign: 'center'
+                  }}>
+                    <div style={{ fontSize: '0.75rem', color: 'white', fontWeight: '500' }}>
+                      Potencial de Vendas: {Math.round(kit.potential).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', padding: 'var(--spacing-2xl)' }}>
+              <Package style={{ width: '48px', height: '48px', color: '#d1d5db', margin: '0 auto var(--spacing-md)' }} />
+              <h4 style={{ fontSize: '1rem', fontWeight: '500', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                Nenhuma correlação encontrada
+              </h4>
+              <p style={{ color: '#6b7280', fontSize: '0.875rem' }}>
+                Tente reduzir o limite de correlação ou aguarde mais dados de vendas.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Data Table */}
+        <div className="card">
+          <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-lg)' }}>
+            Análise Completa de Estoque - Todos os Meses
+          </h3>
+          
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1200px' }}>
+              <thead>
+                <tr style={{ background: '#f1f5f9' }}>
+                  <th style={{
+                    padding: 'var(--spacing-md) var(--spacing-sm)',
+                    textAlign: 'left',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    borderBottom: '2px solid #cbd5e1',
+                    position: 'sticky',
+                    left: 0,
+                    background: '#f1f5f9',
+                    zIndex: 1
+                  }}>SKU</th>
+                  {monthNames.map(month => (
+                    <th key={month} style={{
+                      padding: 'var(--spacing-md) var(--spacing-sm)',
+                      textAlign: 'right',
+                      fontSize: '0.75rem',
+                      fontWeight: '600',
+                      color: '#475569',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      borderBottom: '2px solid #cbd5e1',
+                      minWidth: '80px'
+                    }}>{month.substring(0, 3)}</th>
+                  ))}
+                  <th style={{
+                    padding: 'var(--spacing-md) var(--spacing-sm)',
+                    textAlign: 'right',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    borderBottom: '2px solid #cbd5e1'
+                  }}>Total</th>
+                  <th style={{
+                    padding: 'var(--spacing-md) var(--spacing-sm)',
+                    textAlign: 'right',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    borderBottom: '2px solid #cbd5e1'
+                  }}>Média</th>
+                  <th style={{
+                    padding: 'var(--spacing-md) var(--spacing-sm)',
+                    textAlign: 'right',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    borderBottom: '2px solid #cbd5e1'
+                  }}>Rec. Est.</th>
+                  <th style={{
+                    padding: 'var(--spacing-md) var(--spacing-sm)',
+                    textAlign: 'center',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    borderBottom: '2px solid #cbd5e1'
+                  }}>Curva</th>
+                  <th style={{
+                    padding: 'var(--spacing-md) var(--spacing-sm)',
+                    textAlign: 'center',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    borderBottom: '2px solid #cbd5e1'
+                  }}>Rank</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredData.map((item, index) => (
+                  <tr key={item.sku} style={{
+                    borderBottom: '1px solid #e2e8f0',
+                    backgroundColor: index % 2 === 0 ? '#ffffff' : '#fafbfc'
+                  }}>
+                    <td style={{ 
+                      padding: 'var(--spacing-md) var(--spacing-sm)', 
+                      fontSize: '0.875rem', 
+                      fontWeight: '500', 
+                      color: 'var(--charcoal-black)',
+                      maxWidth: '200px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      position: 'sticky',
+                      left: 0,
+                      background: index % 2 === 0 ? '#ffffff' : '#fafbfc',
+                      zIndex: 1
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)' }}>
+                        {item.isBestSeller && <Star style={{ width: '14px', height: '14px', color: 'var(--orange)' }} />}
+                        <span>{item.sku}</span>
+                      </div>
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.janeiro.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.fevereiro.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.março.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.abril.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.maio.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.junho.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.julho.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.agosto.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.setembro.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.outubro.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.novembro.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '0.875rem', color: '#374151' }}>
+                      {item.dezembro.toLocaleString()}
+                    </td>
+                    <td style={{ 
+                      padding: 'var(--spacing-md) var(--spacing-sm)', 
+                      textAlign: 'right', 
+                      fontSize: '1rem', 
+                      fontWeight: '600', 
+                      color: 'var(--charcoal-black)' 
+                    }}>
+                      {item.totalGeral.toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'right', fontSize: '1rem', color: '#374151' }}>
+                      {item.mediaMensal.toFixed(1)}
+                    </td>
+                    <td style={{ 
+                      padding: 'var(--spacing-md) var(--spacing-sm)', 
+                      textAlign: 'right', 
+                      fontSize: '1rem', 
+                      fontWeight: '600', 
+                      color: 'var(--purple)' 
+                    }}>
+                      {Math.round(item.recomendacaoEstoque).toLocaleString()}
+                    </td>
+                    <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'center' }}>
                       <span style={{
                         display: 'inline-flex',
                         alignItems: 'center',
-                        padding: '4px 12px',
-                        borderRadius: '9999px',
-                        fontSize: '12px',
-                        fontWeight: '500',
-                        backgroundColor: getClassificationBgColor(sku.classification),
-                        color: getClassificationColor(sku.classification)
+                        justifyContent: 'center',
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '50%',
+                        fontSize: '0.75rem',
+                        fontWeight: '600',
+                        backgroundColor: getClassificationBgColor(item.curva),
+                        color: getClassificationColor(item.curva)
                       }}>
-                        Classe {sku.classification}
+                        {item.curva}
                       </span>
-                      <span style={{ fontSize: '12px', color: '#6b7280' }}>Rank #{sku.rank}</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => toggleRowExpansion(sku.sku)}
-                    style={{
-                      color: '#3b82f6',
+                    </td>
+                    <td style={{ 
+                      padding: 'var(--spacing-md) var(--spacing-sm)', 
+                      textAlign: 'center', 
+                      fontSize: '1rem', 
                       fontWeight: '600',
-                      cursor: 'pointer',
-                      border: 'none',
-                      background: 'none',
-                      fontSize: '14px',
-                      padding: '8px'
-                    }}
-                  >
-                    {expandedRows.has(sku.sku) ? 'Ocultar' : 'Detalhes'}
-                  </button>
-                </div>
-
-                {/* Indicators Grid */}
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(2, 1fr)',
-                  gap: '16px'
-                }}>
-                  {/* Demand & Sales Section */}
-                  <div style={{
-                    padding: '16px',
-                    background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
-                    borderRadius: '12px',
-                    border: '1px solid #bae6fd'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                      <TrendingUp style={{ width: '16px', height: '16px', color: '#0ea5e9' }} />
-                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#0c4a6e' }}>Demanda e Vendas</h4>
-                     </div>
-                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#0c4a6e' }}>Taxa de Rotação:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.turnoverRatio}</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#0c4a6e' }}>Dias de Estoque:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.dsi} dias</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#0c4a6e' }}>Variação da Demanda:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.demandVariation}%</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#0c4a6e' }}>Tendência de Vendas:</span>
-                         <span style={{ 
-                           fontWeight: '600', 
-                           color: parseFloat(metrics.salesTrend) > 0 ? '#10b981' : '#ef4444' 
-                         }}>
-                           {metrics.salesTrend}%
-                         </span>
-                       </div>
-                    </div>
-                  </div>
-
-                  {/* Profitability Section */}
-                  <div style={{
-                    padding: '16px',
-                    background: 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)',
-                    borderRadius: '12px',
-                    border: '1px solid #86efac'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                      <DollarSign style={{ width: '16px', height: '16px', color: '#16a34a' }} />
-                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#15803d' }}>Rentabilidade</h4>
-                     </div>
-                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#15803d' }}>Margem Bruta:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.grossMargin}%</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#15803d' }}>GMROII:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.gmroii}</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#15803d' }}>Margem de Contribuição:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>R$ {formatNumber(metrics.contributionMargin)}</span>
-                       </div>
-                    </div>
-                  </div>
-
-                  {/* Inventory Risk Section */}
-                  <div style={{
-                    padding: '16px',
-                    background: 'linear-gradient(135deg, #fef2f2 0%, #fecaca 100%)',
-                    borderRadius: '12px',
-                    border: '1px solid #fca5a5'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                      <AlertTriangle style={{ width: '16px', height: '16px', color: '#dc2626' }} />
-                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#991b1b' }}>Risco de Estoque</h4>
-                     </div>
-                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#991b1b' }}>Taxa de Ruptura:</span>
-                         <span style={{ 
-                           fontWeight: '600', 
-                           color: parseFloat(metrics.stockoutRate) > 10 ? '#ef4444' : '#111827' 
-                         }}>{metrics.stockoutRate}%</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#991b1b' }}>Nível de Serviço:</span>
-                         <span style={{ 
-                           fontWeight: '600', 
-                           color: parseFloat(metrics.serviceLevel) > 90 ? '#10b981' : '#111827' 
-                         }}>{metrics.serviceLevel}%</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#991b1b' }}>Ponto de Reposição:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.reorderPoint}</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#991b1b' }}>Estoque de Segurança:</span>
-                         <span style={{ fontWeight: '600', color: '#111827' }}>{metrics.safetyStock}</span>
-                       </div>
-                    </div>
-                  </div>
-
-                  {/* Classification Alternatives Section */}
-                  <div style={{
-                    padding: '16px',
-                    background: 'linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)',
-                    borderRadius: '12px',
-                    border: '1px solid #c4b5fd'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                      <BarChart3 style={{ width: '16px', height: '16px', color: '#7c3aed' }} />
-                                             <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#6b21a8' }}>Classificações</h4>
-                     </div>
-                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#6b21a8' }}>XYZ (Previsibilidade):</span>
-                         <span style={{ 
-                           fontWeight: '600', 
-                           color: metrics.xyzClassification === 'X' ? '#10b981' : 
-                                  metrics.xyzClassification === 'Y' ? '#f59e0b' : '#ef4444' 
-                         }}>{metrics.xyzClassification}</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#6b21a8' }}>FSN (Movimentação):</span>
-                         <span style={{ 
-                           fontWeight: '600', 
-                           color: metrics.fsnClassification === 'F' ? '#10b981' : 
-                                  metrics.fsnClassification === 'S' ? '#f59e0b' : '#ef4444' 
-                         }}>{metrics.fsnClassification}</span>
-                       </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                         <span style={{ color: '#6b21a8' }}>VED (Criticidade):</span>
-                         <span style={{ 
-                           fontWeight: '600', 
-                           color: metrics.vedClassification === 'V' ? '#ef4444' : 
-                                  metrics.vedClassification === 'E' ? '#f59e0b' : '#10b981' 
-                         }}>{metrics.vedClassification}</span>
-                       </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Expanded Details */}
-                {expandedRows.has(sku.sku) && (
-                  <div style={{
-                    marginTop: '20px',
-                    padding: '20px',
-                    background: 'linear-gradient(135deg, #f9fafb 0%, #e0f2fe 100%)',
-                    borderRadius: '12px',
-                    border: '1px solid #e5e7eb'
-                  }}>
-                    <div style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
-                      gap: '24px'
+                      color: item.rank <= 10 ? '#10b981' : '#6b7280'
                     }}>
-                      <div className="card">
-                        <h4 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
-                          Vendas Mensais
-                        </h4>
-                        <ResponsiveContainer width="100%" height={200}>
-                          <LineChart data={sku.monthlyData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                            <XAxis dataKey="monthName" tick={{ fontSize: 10 }} />
-                            <YAxis tick={{ fontSize: 10 }} />
-                            <Tooltip />
-                            <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2} dot={{ fill: '#3b82f6' }} />
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                      
-                      <div className="card">
-                        <h4 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
-                          Métricas Detalhadas
-                        </h4>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Total Geral:</span>
-                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{formatNumber(sku.totalGeral)}</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Média Mensal:</span>
-                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.mediaMensal.toFixed(2)}</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Recomendação:</span>
-                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{formatNumber(sku.recomendacaoEstoque)}</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '14px', color: '#6b7280' }}>Cobertura:</span>
-                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.cobertura} meses</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '14px', color: '#6b7280' }}>% do Total:</span>
-                            <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{sku.percentage}%</span>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      {showPatternAdjustments && sku.drivers.length > 0 && (
-                        <div className="card">
-                          <h4 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '16px' }}>
-                            Drivers de Ajuste
-                          </h4>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            {sku.drivers.slice(0, 3).map((driver, index) => (
-                              <div key={index} style={{
-                                padding: '8px 12px',
-                                background: '#f9fafb',
-                                borderRadius: '6px',
-                                fontSize: '12px'
-                              }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-                                  <span style={{ fontWeight: '500', color: '#374151' }}>{driver.sku}</span>
-                                  <span style={{
-                                    fontWeight: '600',
-                                    color: driver.impact > 0 ? '#10b981' : '#ef4444'
-                                  }}>
-                                    {driver.impact > 0 ? '+' : ''}{driver.impact.toFixed(1)}%
-                                  </span>
-                                </div>
-                                <div style={{ fontSize: '11px', color: '#6b7280' }}>
-                                  Força: {(driver.strength * 100).toFixed(0)}% | Tipo: {driver.type === 'basket' ? 'Cesta' : 'Correlação'}
-                                </div>
-                              </div>
-                            ))}
-                            <div style={{
-                              padding: '6px 10px',
-                              background: '#e0f2fe',
-                              borderRadius: '4px',
-                              fontSize: '11px',
-                              color: '#0c4a6e',
-                              textAlign: 'center'
-                            }}>
-                              <strong>Ajuste Total:</strong> {(sku.adjustment * 100).toFixed(1)}%
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {filteredData.length === 0 && (
-          <div className="card" style={{ textAlign: 'center', padding: '64px' }}>
-            <Package style={{ width: '64px', height: '64px', color: '#d1d5db', margin: '0 auto 16px' }} />
-            <h3 style={{ fontSize: '18px', fontWeight: '500', color: '#111827', marginBottom: '8px' }}>
-              Nenhum SKU encontrado
-            </h3>
-            <p style={{ color: '#6b7280' }}>
-              Tente ajustar os filtros de busca.
-            </p>
+                      #{item.rank}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )}
+          
+          {filteredData.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 'var(--spacing-2xl)' }}>
+              <Package style={{ width: '64px', height: '64px', color: '#d1d5db', margin: '0 auto var(--spacing-md)' }} />
+              <h3 style={{ fontSize: '1.125rem', fontWeight: '500', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                Nenhum SKU encontrado
+              </h3>
+              <p style={{ color: '#6b7280' }}>
+                Tente ajustar os filtros de busca ou alterar a janela de análise.
+              </p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
