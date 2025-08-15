@@ -74,7 +74,17 @@ const InventoryForecast = () => {
         if (correlation >= correlationThreshold) {
           const kitTotalSales = productA.totalGeral + productB.totalGeral;
           const kitAvgMonthly = (productA.mediaMensal + productB.mediaMensal) / 2;
-          const kitRecommendedStock = kitAvgMonthly * 2.5;
+          
+          // Calculate recommended stock based on individual product performance and correlation
+          // Use the higher performing product as base and apply correlation factor
+          const higherProduct = productA.mediaMensal > productB.mediaMensal ? productA : productB;
+          const lowerProduct = productA.mediaMensal > productB.mediaMensal ? productB : productA;
+          
+          // Recommended stock should be based on the higher performing product
+          // but consider correlation to adjust for kit synergy
+          const baseStock = higherProduct.mediaMensal * 2.5; // Standard recommendation
+          const correlationBonus = correlation >= 0.8 ? 1.3 : correlation >= 0.7 ? 1.2 : 1.1;
+          const kitRecommendedStock = Math.round(baseStock * correlationBonus);
           
           // Calculate potential impact based on correlation and individual product performance
           // Potential = (Average monthly sales of both products) * (Correlation strength) * (12 months) * (Impact multiplier)
@@ -148,14 +158,14 @@ const InventoryForecast = () => {
     let marginType;
     
     if (isAboveThreshold) {
-      // Safe margin: Use the threshold value as minimum safety stock
-      safetyMargin = Math.max(avgLast6Months * 2.5, safeMarginThreshold * 2.5);
-      recommendation = `Margem Segura (≥${safeMarginThreshold.toLocaleString()}/mês)`;
+      // Safe margin: Use 2 months of average sales as safety stock
+      safetyMargin = avgLast6Months * 2;
+      recommendation = `Margem Segura (2 meses de vendas)`;
       marginType = 'safe';
     } else {
-      // Conservative margin: Use lower multiplier but ensure minimum safety
-      safetyMargin = Math.max(avgLast6Months * 1.5, safeMarginThreshold * 0.5);
-      recommendation = `Margem Conservadora (<${safeMarginThreshold.toLocaleString()}/mês)`;
+      // Conservative margin: Use 1.5 months of average sales as safety stock
+      safetyMargin = avgLast6Months * 1.5;
+      recommendation = `Margem Conservadora (1.5 meses)`;
       marginType = 'conservative';
     }
     
@@ -495,7 +505,7 @@ const InventoryForecast = () => {
       'SKU', 'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
       'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
       'Total_Geral', 'Venda_Minima', 'Venda_Maxima', 'Media_Total', 
-      'Media_Mensal', 'Recomendacao_Estoque', 'Margem_Segura_6Meses', 'Tipo_Margem', 'Media_6Meses', 'Curva', 'Rank', 'Meses_Com_Vendas', 'Best_Seller'
+      'Media_Mensal', 'Recomendacao_Estoque', 'Margem_Segura_6Meses', 'Recomendacao_Margem', 'Media_6Meses', 'Curva', 'Rank', 'Meses_Com_Vendas', 'Best_Seller'
     ];
     
     const csvContent = [
@@ -512,7 +522,7 @@ const InventoryForecast = () => {
         item.mediaMensal.toFixed(2),
         item.recomendacaoEstoque.toFixed(0),
         Math.round(item.safeMargin.safeMargin),
-        item.safeMargin.marginType,
+        item.safeMargin.recommendation,
         item.safeMargin.avgLast6Months.toFixed(0),
         item.curva,
         item.rank,
@@ -778,7 +788,7 @@ const InventoryForecast = () => {
             </div>
             <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Margem Segura</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: '#10b981' }}>{summary.safeMarginCount}</p>
-            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>≥{safeMarginThreshold.toLocaleString()}/mês</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>2 meses de vendas</p>
           </div>
 
           <div className="card" style={{ textAlign: 'center' }}>
@@ -796,7 +806,7 @@ const InventoryForecast = () => {
             </div>
             <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Margem Conservadora</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>{summary.conservativeMarginCount}</p>
-            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>&lt;{safeMarginThreshold.toLocaleString()}/mês</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>1.5 meses de vendas</p>
           </div>
         </div>
 
@@ -1094,6 +1104,9 @@ const InventoryForecast = () => {
                       <div style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--purple)' }}>
                         {Math.round(kit.recommendedStock).toLocaleString()}
                       </div>
+                      <div style={{ fontSize: '0.625rem', color: '#6b7280', marginTop: 'var(--spacing-xs)' }}>
+                        Baseado no produto principal
+                      </div>
                     </div>
                   </div>
 
@@ -1331,7 +1344,7 @@ const InventoryForecast = () => {
                           color: item.safeMargin.marginType === 'safe' ? '#10b981' : '#f59e0b',
                           fontWeight: '500'
                         }}>
-                          {item.safeMargin.marginType === 'safe' ? '✓ Segura' : '⚠ Conservadora'}
+                          {item.safeMargin.marginType === 'safe' ? '✓ 2 meses' : '⚠ 1.5 meses'}
                         </span>
                       </div>
                     </td>
@@ -1630,6 +1643,7 @@ const InventoryForecast = () => {
                   <div style={{ fontSize: '0.75rem', opacity: 0.9 }}>
                     Este kit apresenta alta correlação de vendas, indicando que os produtos são frequentemente comprados juntos. 
                     O "Potencial de Vendas" representa o impacto anual estimado considerando a correlação e performance mensal.
+                    O "Estoque Recomendado" é baseado no produto principal com bônus pela correlação.
                     Considere criar promoções combinadas ou posicioná-los próximos no estoque.
                   </div>
                   <div style={{ 
@@ -1640,7 +1654,12 @@ const InventoryForecast = () => {
                     background: 'rgba(255,255,255,0.1)',
                     borderRadius: 'var(--radius-md)'
                   }}>
-                    <strong>Cálculo:</strong> (Média Mensal × Correlação × 12 × Multiplicador de Impacto)
+                    <div style={{ marginBottom: 'var(--spacing-xs)' }}>
+                      <strong>Potencial:</strong> (Média Mensal × Correlação × 12 × Multiplicador de Impacto)
+                    </div>
+                    <div>
+                      <strong>Estoque:</strong> (Produto Principal × 2.5 × Bônus de Correlação)
+                    </div>
                   </div>
                 </div>
               </div>
