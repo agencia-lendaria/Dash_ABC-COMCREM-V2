@@ -13,6 +13,10 @@ const InventoryForecast = () => {
   const [showOnlyVisible, setShowOnlyVisible] = useState(true);
   const [showBestSellers, setShowBestSellers] = useState(true);
   const [sortConfig, setSortConfig] = useState({ key: 'totalGeral', direction: 'desc' });
+  const [kitFilter, setKitFilter] = useState('all');
+  const [validationFilter, setValidationFilter] = useState('all');
+  const [seasonalityFilter, setSeasonalityFilter] = useState('all');
+  const [correlationFilter, setCorrelationFilter] = useState('all');
   const [kitRecommendations, setKitRecommendations] = useState([]);
   const [selectedKit, setSelectedKit] = useState(null);
   const [productRecommendations, setProductRecommendations] = useState([]);
@@ -615,11 +619,50 @@ const InventoryForecast = () => {
 
   const filteredData = useMemo(() => {
     let filtered = data.filter(item => {
+      // Search filter
       const matchesSearch = item.sku.toLowerCase().includes(searchTerm.toLowerCase());
+      
+      // ABC Class filter
       const matchesClass = selectedClass === 'all' || item.curva === selectedClass;
+      
+      // Visibility filter
       const matchesVisibility = !showOnlyVisible || item.isVisible;
+      
+      // Best sellers filter
       const matchesBestSellers = !showBestSellers || item.isBestSeller;
-      return matchesSearch && matchesClass && matchesVisibility && matchesBestSellers;
+      
+      // Kit participation filter
+      const matchesKitFilter = (() => {
+        if (kitFilter === 'all') return true;
+        if (kitFilter === 'in_kits') {
+          return productRecommendations.some(product => product.sku === item.sku);
+        }
+        if (kitFilter === 'not_in_kits') {
+          return !productRecommendations.some(product => product.sku === item.sku);
+        }
+        return true;
+      })();
+      
+      // Validation filter
+      const matchesValidationFilter = (() => {
+        if (validationFilter === 'all') return true;
+        if (validationFilter === 'valid') return item.validation?.isValid;
+        if (validationFilter === 'needs_review') return item.validation?.needsReview;
+        if (validationFilter === 'has_issues') return !item.validation?.isValid;
+        return true;
+      })();
+      
+      // Seasonality filter
+      const matchesSeasonalityFilter = (() => {
+        if (seasonalityFilter === 'all') return true;
+        if (seasonalityFilter === 'seasonal') return item.monthsWithSales <= 3;
+        if (seasonalityFilter === 'low_activity') return item.monthsWithSales <= 6;
+        if (seasonalityFilter === 'year_round') return item.monthsWithSales > 6;
+        return true;
+      })();
+      
+      return matchesSearch && matchesClass && matchesVisibility && matchesBestSellers && 
+             matchesKitFilter && matchesValidationFilter && matchesSeasonalityFilter;
     });
 
     // Sort data
@@ -635,7 +678,8 @@ const InventoryForecast = () => {
     });
 
     return filtered;
-  }, [data, searchTerm, selectedClass, showOnlyVisible, showBestSellers, sortConfig]);
+  }, [data, searchTerm, selectedClass, showOnlyVisible, showBestSellers, sortConfig, 
+      kitFilter, validationFilter, seasonalityFilter, productRecommendations]);
 
   const summary = useMemo(() => {
     const visibleData = data.filter(item => (!showOnlyVisible || item.isVisible) && (!showBestSellers || item.isBestSeller));
@@ -868,9 +912,12 @@ const InventoryForecast = () => {
             }}>
               <Package style={{ width: '24px', height: '24px', color: 'white' }} />
             </div>
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Total SKUs</p>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Total de Produtos</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--charcoal-black)' }}>{summary.totalSKUs}</p>
-            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>({summary.visibleSKUs} exibidos)</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>({summary.visibleSKUs} visíveis)</p>
+            <p style={{ fontSize: '0.625rem', color: '#9ca3af', marginTop: 'var(--spacing-xs)' }}>
+              Todos os produtos no sistema
+            </p>
           </div>
 
           <div className="card" style={{ textAlign: 'center' }}>
@@ -886,9 +933,12 @@ const InventoryForecast = () => {
             }}>
               <Star style={{ width: '24px', height: '24px', color: 'white' }} />
             </div>
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Best Sellers</p>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Produtos Estrela</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--orange)' }}>{summary.bestSellers}</p>
-            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>Top 20% vendas</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>Top 20% em vendas</p>
+            <p style={{ fontSize: '0.625rem', color: '#9ca3af', marginTop: 'var(--spacing-xs)' }}>
+              Produtos com maior volume
+            </p>
           </div>
 
           <div className="card" style={{ textAlign: 'center' }}>
@@ -922,8 +972,11 @@ const InventoryForecast = () => {
             }}>
               <Target style={{ width: '24px', height: '24px', color: 'white' }} />
             </div>
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Classe A</p>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Classe A - Críticos</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: '#ef4444' }}>{summary.classA}</p>
+            <p style={{ fontSize: '0.625rem', color: '#9ca3af', marginTop: 'var(--spacing-xs)' }}>
+              Produtos mais importantes
+            </p>
           </div>
 
           <div className="card" style={{ textAlign: 'center' }}>
@@ -1064,6 +1117,15 @@ const InventoryForecast = () => {
         {/* Filters */}
         <div className="card" style={{ marginBottom: 'var(--spacing-2xl)' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+            <div style={{ marginBottom: 'var(--spacing-sm)' }}>
+              <h4 style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                🔍 Filtros de Análise
+              </h4>
+              <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                Use os filtros abaixo para encontrar produtos específicos e analisar diferentes cenários
+              </p>
+            </div>
+            
             <div style={{ position: 'relative' }}>
               <Search style={{
                 position: 'absolute',
@@ -1076,7 +1138,7 @@ const InventoryForecast = () => {
               }} />
               <input
                 type="text"
-                placeholder="Buscar por SKU..."
+                placeholder="🔍 Buscar por nome do produto..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 style={{
@@ -1090,45 +1152,121 @@ const InventoryForecast = () => {
               />
             </div>
             
-            <div style={{ display: 'flex', gap: 'var(--spacing-md)', flexWrap: 'wrap' }}>
-              <select
-                value={selectedClass}
-                onChange={(e) => setSelectedClass(e.target.value)}
-                className="btn btn-secondary"
-                style={{ padding: 'var(--spacing-sm) var(--spacing-md)' }}
-              >
-                <option value="all">Todas as Classes</option>
-                <option value="A">Classe A</option>
-                <option value="B">Classe B</option>
-                <option value="C">Classe C</option>
-              </select>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--spacing-md)' }}>
+              {/* ABC Class Filter */}
+              <div>
+                <label style={{ fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: 'var(--spacing-xs)', display: 'block' }}>
+                  📊 Classificação ABC
+                </label>
+                <select
+                  value={selectedClass}
+                  onChange={(e) => setSelectedClass(e.target.value)}
+                  className="btn btn-secondary"
+                  style={{ width: '100%', padding: 'var(--spacing-sm) var(--spacing-md)' }}
+                  title="A = Produtos mais importantes (20%), B = Produtos médios (30%), C = Produtos menos importantes (50%)"
+                >
+                  <option value="all">Todas as Classes</option>
+                  <option value="A">Classe A - Produtos Críticos</option>
+                  <option value="B">Classe B - Produtos Médios</option>
+                  <option value="C">Classe C - Produtos Menos Importantes</option>
+                </select>
+              </div>
               
-              <select
-                value={sortConfig.key}
-                onChange={(e) => handleSort(e.target.value)}
-                className="btn btn-secondary"
-                style={{ padding: 'var(--spacing-sm) var(--spacing-md)' }}
-              >
-                <option value="totalGeral">Ordenar por Total Geral</option>
-                <option value="recomendacaoEstoque">Ordenar por Recomendação</option>
-                <option value="mediaTotal">Ordenar por Média Total</option>
-                <option value="rank">Ordenar por Ranking</option>
-                <option value="sku">Ordenar por SKU</option>
-              </select>
+              {/* Kit Participation Filter */}
+              <div>
+                <label style={{ fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: 'var(--spacing-xs)', display: 'block' }}>
+                  📦 Participação em Kits
+                </label>
+                <select
+                  value={kitFilter}
+                  onChange={(e) => setKitFilter(e.target.value)}
+                  className="btn btn-secondary"
+                  style={{ width: '100%', padding: 'var(--spacing-sm) var(--spacing-md)' }}
+                  title="Produtos que aparecem em múltiplos kits promocionais"
+                >
+                  <option value="all">Todos os Produtos</option>
+                  <option value="in_kits">Produtos em Kits</option>
+                  <option value="not_in_kits">Produtos Fora de Kits</option>
+                </select>
+              </div>
               
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--spacing-xs)',
-                padding: 'var(--spacing-sm) var(--spacing-md)',
-                background: '#f1f5f9',
-                borderRadius: 'var(--radius-lg)',
-                fontSize: '0.875rem',
-                color: '#64748b'
-              }}>
+              {/* Validation Filter */}
+              <div>
+                <label style={{ fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: 'var(--spacing-xs)', display: 'block' }}>
+                  ✅ Qualidade dos Dados
+                </label>
+                <select
+                  value={validationFilter}
+                  onChange={(e) => setValidationFilter(e.target.value)}
+                  className="btn btn-secondary"
+                  style={{ width: '100%', padding: 'var(--spacing-sm) var(--spacing-md)' }}
+                  title="Produtos que precisam de revisão devido a padrões suspeitos"
+                >
+                  <option value="all">Todos os Produtos</option>
+                  <option value="valid">Dados Válidos</option>
+                  <option value="needs_review">Precisam Revisão</option>
+                  <option value="has_issues">Com Problemas</option>
+                </select>
+              </div>
+              
+              {/* Seasonality Filter */}
+              <div>
+                <label style={{ fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: 'var(--spacing-xs)', display: 'block' }}>
+                  📅 Sazonalidade
+                </label>
+                <select
+                  value={seasonalityFilter}
+                  onChange={(e) => setSeasonalityFilter(e.target.value)}
+                  className="btn btn-secondary"
+                  style={{ width: '100%', padding: 'var(--spacing-sm) var(--spacing-md)' }}
+                  title="Produtos sazonais vs produtos vendidos o ano todo"
+                >
+                  <option value="all">Todos os Produtos</option>
+                  <option value="seasonal">Produtos Sazonais (&lt;=3 meses)</option>
+                  <option value="low_activity">Baixa Atividade (&lt;=6 meses)</option>
+                  <option value="year_round">Ano Todo (&gt;6 meses)</option>
+                </select>
+              </div>
+              
+              {/* Sort Options */}
+              <div>
+                <label style={{ fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: 'var(--spacing-xs)', display: 'block' }}>
+                  📈 Ordenação
+                </label>
+                <select
+                  value={sortConfig.key}
+                  onChange={(e) => handleSort(e.target.value)}
+                  className="btn btn-secondary"
+                  style={{ width: '100%', padding: 'var(--spacing-sm) var(--spacing-md)' }}
+                >
+                  <option value="totalGeral">Maior Venda Total</option>
+                  <option value="recomendacaoEstoque">Maior Estoque Recomendado</option>
+                  <option value="mediaTotal">Maior Média Mensal</option>
+                  <option value="rank">Melhor Ranking</option>
+                  <option value="sku">Ordem Alfabética</option>
+                </select>
+              </div>
+            </div>
+            
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: 'var(--spacing-md)',
+              background: '#f8fafc',
+              borderRadius: 'var(--radius-lg)',
+              fontSize: '0.875rem',
+              color: '#64748b'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm)' }}>
                 <Filter style={{ width: '16px', height: '16px' }} />
-                {filteredData.length} de {summary.visibleSKUs} itens
-                {showBestSellers && <span style={{ color: 'var(--orange)', fontWeight: '500' }}>• Best Sellers</span>}
+                <span><strong>{filteredData.length}</strong> produtos encontrados</span>
+                <span>•</span>
+                <span>de <strong>{summary.visibleSKUs}</strong> produtos totais</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm)' }}>
+                {showBestSellers && <span style={{ color: 'var(--orange)', fontWeight: '500' }}>⭐ Best Sellers</span>}
+                {showOnlyVisible && <span style={{ color: 'var(--blue)', fontWeight: '500' }}>👁️ Top Performers</span>}
               </div>
             </div>
           </div>
@@ -1299,9 +1437,14 @@ const InventoryForecast = () => {
 
         {/* Data Table */}
         <div className="card">
-          <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-lg)' }}>
-            Análise Completa de Estoque - Todos os Meses
-          </h3>
+          <div style={{ marginBottom: 'var(--spacing-lg)' }}>
+            <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+              📊 Análise Completa de Estoque
+            </h3>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+              Dados detalhados de vendas mensais, recomendações de estoque e classificação ABC para todos os produtos
+            </p>
+          </div>
           
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1200px' }}>
@@ -1320,7 +1463,7 @@ const InventoryForecast = () => {
                     left: 0,
                     background: '#f1f5f9',
                     zIndex: 1
-                  }}>SKU</th>
+                  }} title="Nome do produto">PRODUTO</th>
                   {monthNames.map(month => (
                     <th key={month} style={{
                       padding: 'var(--spacing-md) var(--spacing-sm)',
@@ -1343,7 +1486,7 @@ const InventoryForecast = () => {
                     textTransform: 'uppercase',
                     letterSpacing: '0.05em',
                     borderBottom: '2px solid #cbd5e1'
-                  }}>Total</th>
+                  }} title="Total de vendas no ano">Total</th>
                   <th style={{
                     padding: 'var(--spacing-md) var(--spacing-sm)',
                     textAlign: 'right',
@@ -1353,7 +1496,7 @@ const InventoryForecast = () => {
                     textTransform: 'uppercase',
                     letterSpacing: '0.05em',
                     borderBottom: '2px solid #cbd5e1'
-                  }}>Média</th>
+                  }} title="Média mensal de vendas">Média</th>
                   <th style={{
                     padding: 'var(--spacing-md) var(--spacing-sm)',
                     textAlign: 'right',
@@ -1363,7 +1506,7 @@ const InventoryForecast = () => {
                     textTransform: 'uppercase',
                     letterSpacing: '0.05em',
                     borderBottom: '2px solid #cbd5e1'
-                  }}>Rec. Est.</th>
+                  }} title="Estoque recomendado baseado na classe ABC e variabilidade">Rec. Est.</th>
                   <th style={{
                     padding: 'var(--spacing-md) var(--spacing-sm)',
                     textAlign: 'right',
@@ -1383,7 +1526,7 @@ const InventoryForecast = () => {
                     textTransform: 'uppercase',
                     letterSpacing: '0.05em',
                     borderBottom: '2px solid #cbd5e1'
-                  }}>Curva</th>
+                  }} title="Classificação ABC: A=Crítico, B=Médio, C=Menos importante">Curva</th>
                   <th style={{
                     padding: 'var(--spacing-md) var(--spacing-sm)',
                     textAlign: 'center',
@@ -1835,6 +1978,65 @@ const InventoryForecast = () => {
             </div>
           </div>
         )}
+
+        {/* Help Section */}
+        <div className="card" style={{ marginTop: 'var(--spacing-2xl)' }}>
+          <h4 style={{ fontSize: '1.125rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-md)' }}>
+            💡 Guia de Símbolos e Significados
+          </h4>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'var(--spacing-lg)' }}>
+            <div>
+              <h5 style={{ fontSize: '1rem', fontWeight: '500', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-sm)' }}>
+                📊 Classificação ABC
+              </h5>
+              <div style={{ fontSize: '0.875rem', color: '#6b7280', lineHeight: '1.5' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)', marginBottom: 'var(--spacing-xs)' }}>
+                  <span style={{ color: '#ef4444', fontWeight: '600' }}>A</span> - Produtos críticos (20% dos produtos, 80% das vendas)
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)', marginBottom: 'var(--spacing-xs)' }}>
+                  <span style={{ color: '#f59e0b', fontWeight: '600' }}>B</span> - Produtos médios (30% dos produtos, 15% das vendas)
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)' }}>
+                  <span style={{ color: '#10b981', fontWeight: '600' }}>C</span> - Produtos menos importantes (50% dos produtos, 5% das vendas)
+                </div>
+              </div>
+            </div>
+            
+            <div>
+              <h5 style={{ fontSize: '1rem', fontWeight: '500', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-sm)' }}>
+                ⚠️ Indicadores de Qualidade
+              </h5>
+              <div style={{ fontSize: '0.875rem', color: '#6b7280', lineHeight: '1.5' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)', marginBottom: 'var(--spacing-xs)' }}>
+                  <span style={{ color: '#10b981' }}>✓</span> - Margem Segura (2 meses de vendas)
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)', marginBottom: 'var(--spacing-xs)' }}>
+                  <span style={{ color: '#f59e0b' }}>⚠</span> - Margem Conservadora (1.5 meses)
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)' }}>
+                  <span style={{ color: '#ef4444' }}>⚠ Revisar</span> - Produto precisa de análise
+                </div>
+              </div>
+            </div>
+            
+            <div>
+              <h5 style={{ fontSize: '1rem', fontWeight: '500', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-sm)' }}>
+                📦 Kits e Correlações
+              </h5>
+              <div style={{ fontSize: '0.875rem', color: '#6b7280', lineHeight: '1.5' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)', marginBottom: 'var(--spacing-xs)' }}>
+                  <span style={{ color: 'var(--teal)' }}>📦</span> - Produto aparece em kits promocionais
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)', marginBottom: 'var(--spacing-xs)' }}>
+                  <span style={{ color: 'var(--orange)' }}>⭐</span> - Produto estrela (top 20%)
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)' }}>
+                  <span style={{ color: 'var(--blue)' }}>👁️</span> - Top performer (visível por padrão)
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
