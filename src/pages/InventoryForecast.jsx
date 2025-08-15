@@ -16,6 +16,8 @@ const InventoryForecast = () => {
   const [kitFilter, setKitFilter] = useState('all');
   const [validationFilter, setValidationFilter] = useState('all');
   const [seasonalityFilter, setSeasonalityFilter] = useState('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(50);
   const [correlationFilter, setCorrelationFilter] = useState('all');
   const [kitRecommendations, setKitRecommendations] = useState([]);
   const [selectedKit, setSelectedKit] = useState(null);
@@ -618,17 +620,6 @@ const InventoryForecast = () => {
   }, [data, generateKitRecommendations]);
 
   const filteredData = useMemo(() => {
-    console.log('Filtering data:', {
-      searchTerm,
-      selectedClass,
-      showOnlyVisible,
-      showBestSellers,
-      kitFilter,
-      validationFilter,
-      seasonalityFilter,
-      productRecommendationsCount: productRecommendations.length
-    });
-
     let filtered = data.filter(item => {
       // Search filter
       const matchesSearch = item.sku.toLowerCase().includes(searchTerm.toLowerCase());
@@ -692,10 +683,20 @@ const InventoryForecast = () => {
       }
     });
 
-    console.log(`Filtered ${filtered.length} products from ${data.length} total`);
     return filtered;
   }, [data, searchTerm, selectedClass, showOnlyVisible, showBestSellers, sortConfig, 
       kitFilter, validationFilter, seasonalityFilter, productRecommendations]);
+
+  // Pagination logic
+  const totalPages = Math.ceil(filteredData.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedData = filteredData.slice(startIndex, endIndex);
+
+  // Reset to first page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, selectedClass, showOnlyVisible, showBestSellers, kitFilter, validationFilter, seasonalityFilter]);
 
   const summary = useMemo(() => {
     const visibleData = data.filter(item => (!showOnlyVisible || item.isVisible) && (!showBestSellers || item.isBestSeller));
@@ -1253,6 +1254,27 @@ const InventoryForecast = () => {
                   <option value="sku">Ordem Alfabética</option>
                 </select>
               </div>
+
+              {/* Items Per Page */}
+              <div>
+                <label style={{ fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: 'var(--spacing-xs)', display: 'block' }}>
+                  📄 Itens por Página
+                </label>
+                <select
+                  value={itemsPerPage}
+                  onChange={(e) => {
+                    setItemsPerPage(Number(e.target.value));
+                    setCurrentPage(1);
+                  }}
+                  className="btn btn-secondary"
+                  style={{ width: '100%', padding: 'var(--spacing-sm) var(--spacing-md)' }}
+                >
+                  <option value={25}>25 produtos</option>
+                  <option value={50}>50 produtos</option>
+                  <option value={100}>100 produtos</option>
+                  <option value={200}>200 produtos</option>
+                </select>
+              </div>
             </div>
             
             <div style={{
@@ -1269,7 +1291,9 @@ const InventoryForecast = () => {
                 <Filter style={{ width: '16px', height: '16px' }} />
                 <span><strong>{filteredData.length}</strong> produtos encontrados</span>
                 <span>•</span>
-                <span>de <strong>{summary.visibleSKUs}</strong> produtos totais</span>
+                <span>Página <strong>{currentPage}</strong> de <strong>{totalPages}</strong></span>
+                <span>•</span>
+                <span>Mostrando <strong>{startIndex + 1}</strong>-<strong>{Math.min(endIndex, filteredData.length)}</strong></span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm)' }}>
                 {showBestSellers && <span style={{ color: 'var(--orange)', fontWeight: '500' }}>⭐ Best Sellers</span>}
@@ -1547,7 +1571,7 @@ const InventoryForecast = () => {
                 </tr>
               </thead>
               <tbody>
-                {filteredData.map((item, index) => (
+                {paginatedData.map((item, index) => (
                   <tr key={item.sku} style={{
                     borderBottom: '1px solid #e2e8f0',
                     backgroundColor: index % 2 === 0 ? '#ffffff' : '#fafbfc'
@@ -1707,6 +1731,91 @@ const InventoryForecast = () => {
               <p style={{ color: '#6b7280' }}>
                 Tente ajustar os filtros de busca ou alterar a janela de análise.
               </p>
+            </div>
+          )}
+
+          {/* Pagination Controls */}
+          {filteredData.length > 0 && totalPages > 1 && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: 'var(--spacing-lg)',
+              background: '#f8fafc',
+              borderRadius: 'var(--radius-lg)',
+              marginTop: 'var(--spacing-lg)'
+            }}>
+              <div style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                Mostrando <strong>{startIndex + 1}</strong> a <strong>{Math.min(endIndex, filteredData.length)}</strong> de <strong>{filteredData.length}</strong> produtos
+              </div>
+              
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm)' }}>
+                <button
+                  onClick={() => setCurrentPage(1)}
+                  disabled={currentPage === 1}
+                  className="btn btn-secondary"
+                  style={{
+                    padding: 'var(--spacing-xs) var(--spacing-sm)',
+                    fontSize: '0.75rem',
+                    opacity: currentPage === 1 ? 0.5 : 1
+                  }}
+                >
+                  ⏮️ Primeira
+                </button>
+                
+                <button
+                  onClick={() => setCurrentPage(currentPage - 1)}
+                  disabled={currentPage === 1}
+                  className="btn btn-secondary"
+                  style={{
+                    padding: 'var(--spacing-xs) var(--spacing-sm)',
+                    fontSize: '0.75rem',
+                    opacity: currentPage === 1 ? 0.5 : 1
+                  }}
+                >
+                  ◀️ Anterior
+                </button>
+                
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 'var(--spacing-xs)',
+                  padding: 'var(--spacing-xs) var(--spacing-sm)',
+                  background: '#ffffff',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid #d1d5db'
+                }}>
+                  <span style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--charcoal-black)' }}>
+                    Página {currentPage} de {totalPages}
+                  </span>
+                </div>
+                
+                <button
+                  onClick={() => setCurrentPage(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                  className="btn btn-secondary"
+                  style={{
+                    padding: 'var(--spacing-xs) var(--spacing-sm)',
+                    fontSize: '0.75rem',
+                    opacity: currentPage === totalPages ? 0.5 : 1
+                  }}
+                >
+                  Próxima ▶️
+                </button>
+                
+                <button
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={currentPage === totalPages}
+                  className="btn btn-secondary"
+                  style={{
+                    padding: 'var(--spacing-xs) var(--spacing-sm)',
+                    fontSize: '0.75rem',
+                    opacity: currentPage === totalPages ? 0.5 : 1
+                  }}
+                >
+                  Última ⏭️
+                </button>
+              </div>
             </div>
           )}
         </div>
