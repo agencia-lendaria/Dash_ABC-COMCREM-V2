@@ -76,6 +76,11 @@ const InventoryForecast = () => {
           const kitAvgMonthly = (productA.mediaMensal + productB.mediaMensal) / 2;
           const kitRecommendedStock = kitAvgMonthly * 2.5;
           
+          // Calculate potential impact based on correlation and individual product performance
+          // Potential = (Average monthly sales of both products) * (Correlation strength) * (12 months) * (Impact multiplier)
+          const impactMultiplier = correlation >= 0.8 ? 1.5 : correlation >= 0.7 ? 1.3 : 1.1;
+          const potential = kitAvgMonthly * correlation * 12 * impactMultiplier;
+          
           recommendations.push({
             id: `kit_${recommendations.length + 1}`,
             products: [
@@ -86,7 +91,7 @@ const InventoryForecast = () => {
             totalSales: kitTotalSales,
             avgMonthlySales: kitAvgMonthly,
             recommendedStock: kitRecommendedStock,
-            potential: kitTotalSales * correlation, // Potential sales impact based on total annual sales and correlation strength
+            potential: Math.round(potential), // Potential annual impact considering correlation and monthly performance
             type: 'duo'
           });
         }
@@ -1607,7 +1612,7 @@ const InventoryForecast = () => {
                       {Math.round(selectedKit.potential).toLocaleString()}
                     </div>
                     <div style={{ fontSize: '0.625rem', color: '#6b7280', marginTop: 'var(--spacing-xs)' }}>
-                      (Anual × Correlação)
+                      (Impacto Anual)
                     </div>
                   </div>
                 </div>
@@ -1624,8 +1629,18 @@ const InventoryForecast = () => {
                   </div>
                   <div style={{ fontSize: '0.75rem', opacity: 0.9 }}>
                     Este kit apresenta alta correlação de vendas, indicando que os produtos são frequentemente comprados juntos. 
-                    O "Potencial de Vendas" é calculado multiplicando as vendas anuais combinadas pela força da correlação.
+                    O "Potencial de Vendas" representa o impacto anual estimado considerando a correlação e performance mensal.
                     Considere criar promoções combinadas ou posicioná-los próximos no estoque.
+                  </div>
+                  <div style={{ 
+                    fontSize: '0.625rem', 
+                    opacity: 0.8, 
+                    marginTop: 'var(--spacing-sm)',
+                    padding: 'var(--spacing-xs)',
+                    background: 'rgba(255,255,255,0.1)',
+                    borderRadius: 'var(--radius-md)'
+                  }}>
+                    <strong>Cálculo:</strong> (Média Mensal × Correlação × 12 × Multiplicador de Impacto)
                   </div>
                 </div>
               </div>
