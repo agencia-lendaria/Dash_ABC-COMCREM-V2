@@ -14,15 +14,37 @@ const InventoryForecast = () => {
   const [showBestSellers, setShowBestSellers] = useState(true);
   const [sortConfig, setSortConfig] = useState({ key: 'totalGeral', direction: 'desc' });
   const [kitRecommendations, setKitRecommendations] = useState([]);
-  const [correlationThreshold, setCorrelationThreshold] = useState(0.6);
   const [selectedKit, setSelectedKit] = useState(null);
-  const [safeMarginThreshold, setSafeMarginThreshold] = useState(5000);
   const [productRecommendations, setProductRecommendations] = useState([]);
 
   const monthNames = [
     'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
     'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
   ];
+
+  // Helper function for safe calculations
+  const safeCalculation = (calculationFn, fallbackValue) => {
+    try {
+      return calculationFn();
+    } catch (error) {
+      console.error('Calculation error:', error);
+      return fallbackValue;
+    }
+  };
+
+  // Calculate percentile for auto-thresholds
+  const calculatePercentile = (values, percentile) => {
+    const sorted = values.sort((a, b) => a - b);
+    const index = Math.ceil((percentile / 100) * sorted.length) - 1;
+    return sorted[index] || 0;
+  };
+
+  // Calculate demand variability
+  const calculateDemandVariability = (salesArray) => {
+    const mean = salesArray.reduce((sum, val) => sum + val, 0) / salesArray.length;
+    const variance = salesArray.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / salesArray.length;
+    return mean > 0 ? Math.sqrt(variance) / mean : 0;
+  };
 
   // Calculate Pearson correlation coefficient between two product sales arrays
   const calculateCorrelation = (productA, productB) => {
@@ -58,10 +80,15 @@ const InventoryForecast = () => {
     // Only analyze top performers to reduce computation and focus on valuable kits
     const topPerformers = skuData
       .filter(sku => sku.isBestSeller || sku.curva === 'A')
-      .slice(0, 50); // Limit to top 50 to avoid performance issues
+      .slice(0, Math.min(30, Math.ceil(skuData.length * 0.1))); // Max 30 or 10% of products
 
-    for (let i = 0; i < topPerformers.length; i++) {
-      for (let j = i + 1; j < topPerformers.length; j++) {
+    // Limit combinations to prevent performance issues
+    const maxCombinations = 500;
+    let combinationCount = 0;
+
+    for (let i = 0; i < topPerformers.length && combinationCount < maxCombinations; i++) {
+      for (let j = i + 1; j < topPerformers.length && combinationCount < maxCombinations; j++) {
+        combinationCount++;
         const productA = topPerformers[i];
         const productB = topPerformers[j];
         
@@ -71,7 +98,9 @@ const InventoryForecast = () => {
 
         const correlation = calculateCorrelation(productA, productB);
         
-        if (correlation >= correlationThreshold) {
+        // Auto-calculate threshold based on statistical significance
+        const minCorrelationForSignificance = 0.576; // p<0.05 for n=12 months
+        if (correlation >= minCorrelationForSignificance) {
           const kitTotalSales = productA.totalGeral + productB.totalGeral;
           const kitAvgMonthly = (productA.mediaMensal + productB.mediaMensal) / 2;
           
@@ -140,17 +169,17 @@ const InventoryForecast = () => {
       .slice(0, 15); // Top 15 most used products
 
     return { kits: sortedRecommendations, products: productRecommendations };
-  }, [correlationThreshold, safeMarginThreshold]);
+  }, []);
 
   // Calculate safe margin based on last 6 months average
-  const calculateSafeMargin = (sku) => {
+  const calculateSafeMargin = (sku, autoThreshold) => {
     const last6Months = [
       sku.julho, sku.agosto, sku.setembro, sku.outubro, sku.novembro, sku.dezembro
     ];
     const avgLast6Months = last6Months.reduce((sum, val) => sum + val, 0) / 6;
     
-    // Rule: If average of last 6 months >= threshold, use safe margin
-    const isAboveThreshold = avgLast6Months >= safeMarginThreshold;
+    // Rule: If average of last 6 months >= auto-calculated threshold, use safe margin
+    const isAboveThreshold = avgLast6Months >= autoThreshold;
     
     // Calculate safety margin based on the rule
     let safetyMargin;
@@ -175,7 +204,7 @@ const InventoryForecast = () => {
       safeMargin: safetyMargin,
       recommendation: recommendation,
       marginType: marginType,
-      threshold: safeMarginThreshold
+      threshold: autoThreshold
     };
   };
 
@@ -191,8 +220,8 @@ const InventoryForecast = () => {
       cumulativePercent += (item.totalGeral / totalSales) * 100;
       
       let classification;
-      if (cumulativePercent <= 20) classification = 'A';
-      else if (cumulativePercent <= 50) classification = 'B';
+      if (cumulativePercent <= 80) classification = 'A';
+      else if (cumulativePercent <= 95) classification = 'B';
       else classification = 'C';
       
       return {
@@ -289,9 +318,27 @@ const InventoryForecast = () => {
         const totalGeral = salesArray.reduce((sum, val) => sum + val, 0);
         const vendaMinima = nonZeroSales.length > 0 ? Math.min(...nonZeroSales) : 0;
         const vendaMaxima = nonZeroSales.length > 0 ? Math.max(...nonZeroSales) : 0;
-        const mediaTotal = nonZeroSales.length > 0 ? totalGeral / nonZeroSales.length : 0;
+        const mediaTotal = totalGeral / 12; // Fixed average calculation
         const mediaMensal = totalGeral / 12; // Average across 12 months
-        const recomendacaoEstoque = mediaMensal * 2.5; // Slightly higher multiplier for annual data
+        
+        // Calculate demand variability for stock multiplier
+        const demandVariability = calculateDemandVariability(salesArray);
+        
+        // Get stock multiplier based on product class (will be calculated after ABC classification)
+        const getStockMultiplier = (classification, variability) => {
+          const baseMultiplier = {
+            'A': 3.0,  // Higher stock for critical items
+            'B': 2.5,  // Standard stock
+            'C': 2.0   // Lower stock for less important items
+          };
+          
+          // Adjust for demand variability
+          const variabilityAdjustment = variability > 0.5 ? 0.5 : 0;
+          return baseMultiplier[classification] + variabilityAdjustment;
+        };
+        
+        // Temporary stock recommendation (will be updated after ABC classification)
+        const recomendacaoEstoque = mediaMensal * 2.5;
         
         // Calculate safe margin based on last 6 months
         const safeMargin = calculateSafeMargin(sku);
@@ -338,11 +385,68 @@ const InventoryForecast = () => {
 
       // Filter out SKUs with no sales and calculate ABC classification
       const activeSkus = processedData.filter(sku => sku.totalGeral > 0);
-      const classifiedData = calculateABCClassification(activeSkus);
+      const classifiedData = safeCalculation(
+        () => calculateABCClassification(activeSkus),
+        activeSkus.map(item => ({ ...item, curva: 'C' }))
+      );
       
-      // Determine "best sellers" and visibility
-      const sortedByTotal = [...classifiedData].sort((a, b) => b.totalGeral - a.totalGeral);
-      const bestSellerThreshold = Math.ceil(sortedByTotal.length * 0.2); // Top 20% are best sellers
+      // Auto-calculate safe margin threshold as 75th percentile
+      const allProductAverages = activeSkus.map(sku => {
+        const last6Months = [sku.julho, sku.agosto, sku.setembro, sku.outubro, sku.novembro, sku.dezembro];
+        return last6Months.reduce((sum, val) => sum + val, 0) / 6;
+      });
+      const autoThreshold = calculatePercentile(allProductAverages, 75);
+      
+      // Update stock recommendations based on ABC classification and demand variability
+      const updatedData = classifiedData.map(sku => {
+        const salesArray = [
+          sku.janeiro, sku.fevereiro, sku.março, sku.abril, sku.maio, sku.junho,
+          sku.julho, sku.agosto, sku.setembro, sku.outubro, sku.novembro, sku.dezembro
+        ];
+        const demandVariability = calculateDemandVariability(salesArray);
+        
+        const getStockMultiplier = (classification, variability) => {
+          const baseMultiplier = {
+            'A': 3.0,  // Higher stock for critical items
+            'B': 2.5,  // Standard stock
+            'C': 2.0   // Lower stock for less important items
+          };
+          
+          // Adjust for demand variability
+          const variabilityAdjustment = variability > 0.5 ? 0.5 : 0;
+          return baseMultiplier[classification] + variabilityAdjustment;
+        };
+        
+        const stockMultiplier = getStockMultiplier(sku.curva, demandVariability);
+        const recomendacaoEstoque = sku.mediaMensal * stockMultiplier;
+        
+        // Calculate safe margin with auto threshold
+        const safeMargin = calculateSafeMargin(sku, autoThreshold);
+        
+        return {
+          ...sku,
+          recomendacaoEstoque,
+          safeMargin,
+          demandVariability
+        };
+      });
+      
+      // Auto-determine best seller percentage using Pareto principle
+      const findNaturalBreak = (sortedData) => {
+        const totalSales = sortedData.reduce((sum, item) => sum + item.totalGeral, 0);
+        let cumulativePercent = 0;
+        
+        for (let i = 0; i < sortedData.length; i++) {
+          cumulativePercent += (sortedData[i].totalGeral / totalSales) * 100;
+          if (cumulativePercent >= 80) { // 80% of sales
+            return i + 1;
+          }
+        }
+        return Math.ceil(sortedData.length * 0.2); // Fallback to 20%
+      };
+      
+      const sortedByTotal = [...updatedData].sort((a, b) => b.totalGeral - a.totalGeral);
+      const bestSellerThreshold = findNaturalBreak(sortedByTotal);
       const visibleThreshold = Math.ceil(sortedByTotal.length * 0.3); // Top 30% are visible by default
       
       sortedByTotal.forEach((item, index) => {
@@ -351,15 +455,16 @@ const InventoryForecast = () => {
         item.rank = index + 1;
       });
 
-      console.log(`✅ Processed ${classifiedData.length} SKUs, ${bestSellerThreshold} best sellers, ${visibleThreshold} visible`);
+      console.log(`✅ Processed ${updatedData.length} SKUs, ${bestSellerThreshold} best sellers, ${visibleThreshold} visible`);
+      console.log(`📊 Auto-calculated threshold: ${autoThreshold.toFixed(0)} units/month`);
       
       // Generate kit recommendations based on correlations
-      const recommendations = generateKitRecommendations(classifiedData);
+      const recommendations = generateKitRecommendations(updatedData);
       setKitRecommendations(recommendations.kits);
       setProductRecommendations(recommendations.products);
       console.log(`🎯 Generated ${recommendations.kits.length} kit recommendations and ${recommendations.products.length} product recommendations`);
       
-      return classifiedData;
+      return updatedData;
       
     } catch (err) {
       console.error('❌ Error processing data:', err);
@@ -416,15 +521,15 @@ const InventoryForecast = () => {
     loadData();
   }, [loadData]);
 
-  // Regenerate kit recommendations when correlation threshold changes
+  // Regenerate kit recommendations when data changes
   useEffect(() => {
     if (data.length > 0) {
       const recommendations = generateKitRecommendations(data);
       setKitRecommendations(recommendations.kits);
       setProductRecommendations(recommendations.products);
-      console.log(`🎯 Regenerated ${recommendations.kits.length} kit recommendations and ${recommendations.products.length} product recommendations with ${correlationThreshold} threshold`);
+      console.log(`🎯 Regenerated ${recommendations.kits.length} kit recommendations and ${recommendations.products.length} product recommendations`);
     }
-  }, [correlationThreshold, safeMarginThreshold, data, generateKitRecommendations]);
+  }, [data, generateKitRecommendations]);
 
   const filteredData = useMemo(() => {
     let filtered = data.filter(item => {
@@ -788,7 +893,7 @@ const InventoryForecast = () => {
             </div>
             <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Margem Segura</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: '#10b981' }}>{summary.safeMarginCount}</p>
-            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>2 meses de vendas</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>Auto-calculado</p>
           </div>
 
           <div className="card" style={{ textAlign: 'center' }}>
@@ -806,7 +911,7 @@ const InventoryForecast = () => {
             </div>
             <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Margem Conservadora</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>{summary.conservativeMarginCount}</p>
-            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>1.5 meses de vendas</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>Auto-calculado</p>
           </div>
         </div>
 
@@ -949,52 +1054,25 @@ const InventoryForecast = () => {
 
         {/* Kit Recommendations */}
         <div className="card" style={{ marginBottom: 'var(--spacing-2xl)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-lg)' }}>
-            <div>
-              <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
-                🎯 Recomendações de Kits
-              </h3>
-              <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
-                Produtos com alta correlação de vendas - ideais para kits promocionais
-              </p>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-lg)' }}>
+              <div>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                  🎯 Recomendações de Kits
+                </h3>
+                <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                  Produtos com alta correlação de vendas - ideais para kits promocionais
+                </p>
+              </div>
+              <div style={{ 
+                padding: 'var(--spacing-sm) var(--spacing-md)', 
+                background: '#f1f5f9', 
+                borderRadius: 'var(--radius-lg)',
+                fontSize: '0.875rem',
+                color: '#64748b'
+              }}>
+                <strong>Auto-calculado:</strong> Correlação ≥57.6% (p&lt;0.05)
+              </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
-              <label style={{ fontSize: '0.875rem', color: '#374151', fontWeight: '500' }}>
-                Correlação Mínima:
-              </label>
-              <select
-                value={correlationThreshold}
-                onChange={(e) => setCorrelationThreshold(parseFloat(e.target.value))}
-                className="btn btn-secondary"
-                style={{ padding: 'var(--spacing-sm) var(--spacing-md)' }}
-              >
-                <option value={0.5}>50%</option>
-                <option value={0.6}>60%</option>
-                <option value={0.7}>70%</option>
-                <option value={0.8}>80%</option>
-                <option value={0.9}>90%</option>
-              </select>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
-              <label style={{ fontSize: '0.875rem', color: '#374151', fontWeight: '500' }}>
-                Margem Segura (6 meses):
-              </label>
-              <input
-                type="number"
-                value={safeMarginThreshold}
-                onChange={(e) => setSafeMarginThreshold(parseInt(e.target.value))}
-                className="btn btn-secondary"
-                style={{ 
-                  padding: 'var(--spacing-sm) var(--spacing-md)',
-                  width: '100px',
-                  textAlign: 'center'
-                }}
-                min="1000"
-                max="50000"
-                step="500"
-              />
-            </div>
-          </div>
 
           {kitRecommendations.length > 0 ? (
             <div style={{
