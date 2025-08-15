@@ -133,13 +133,34 @@ const InventoryForecast = () => {
       sku.julho, sku.agosto, sku.setembro, sku.outubro, sku.novembro, sku.dezembro
     ];
     const avgLast6Months = last6Months.reduce((sum, val) => sum + val, 0) / 6;
+    
+    // Rule: If average of last 6 months >= threshold, use safe margin
     const isAboveThreshold = avgLast6Months >= safeMarginThreshold;
+    
+    // Calculate safety margin based on the rule
+    let safetyMargin;
+    let recommendation;
+    let marginType;
+    
+    if (isAboveThreshold) {
+      // Safe margin: Use the threshold value as minimum safety stock
+      safetyMargin = Math.max(avgLast6Months * 2.5, safeMarginThreshold * 2.5);
+      recommendation = `Margem Segura (≥${safeMarginThreshold.toLocaleString()}/mês)`;
+      marginType = 'safe';
+    } else {
+      // Conservative margin: Use lower multiplier but ensure minimum safety
+      safetyMargin = Math.max(avgLast6Months * 1.5, safeMarginThreshold * 0.5);
+      recommendation = `Margem Conservadora (<${safeMarginThreshold.toLocaleString()}/mês)`;
+      marginType = 'conservative';
+    }
     
     return {
       avgLast6Months: avgLast6Months,
       isAboveThreshold: isAboveThreshold,
-      safeMargin: isAboveThreshold ? avgLast6Months * 2.5 : avgLast6Months * 1.5,
-      recommendation: isAboveThreshold ? 'Margem Segura' : 'Margem Conservadora'
+      safeMargin: safetyMargin,
+      recommendation: recommendation,
+      marginType: marginType,
+      threshold: safeMarginThreshold
     };
   };
 
@@ -418,6 +439,10 @@ const InventoryForecast = () => {
     const visibleData = data.filter(item => (!showOnlyVisible || item.isVisible) && (!showBestSellers || item.isBestSeller));
     const bestSellersData = data.filter(item => item.isBestSeller);
     
+    // Calculate safety margin statistics
+    const safeMarginData = visibleData.filter(item => item.safeMargin?.marginType === 'safe');
+    const conservativeMarginData = visibleData.filter(item => item.safeMargin?.marginType === 'conservative');
+    
     return {
       totalSKUs: data.length,
       visibleSKUs: visibleData.length,
@@ -426,7 +451,11 @@ const InventoryForecast = () => {
       classB: visibleData.filter(item => item.curva === 'B').length,
       classC: visibleData.filter(item => item.curva === 'C').length,
       totalSales: visibleData.reduce((sum, item) => sum + item.totalGeral, 0),
-      averageRecommendation: visibleData.reduce((sum, item) => sum + item.recomendacaoEstoque, 0) / (visibleData.length || 1)
+      averageRecommendation: visibleData.reduce((sum, item) => sum + item.recomendacaoEstoque, 0) / (visibleData.length || 1),
+      safeMarginCount: safeMarginData.length,
+      conservativeMarginCount: conservativeMarginData.length,
+      averageSafeMargin: safeMarginData.reduce((sum, item) => sum + item.safeMargin.safeMargin, 0) / (safeMarginData.length || 1),
+      averageConservativeMargin: conservativeMarginData.reduce((sum, item) => sum + item.safeMargin.safeMargin, 0) / (conservativeMarginData.length || 1)
     };
   }, [data, showOnlyVisible, showBestSellers]);
 
@@ -461,7 +490,7 @@ const InventoryForecast = () => {
       'SKU', 'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
       'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
       'Total_Geral', 'Venda_Minima', 'Venda_Maxima', 'Media_Total', 
-      'Media_Mensal', 'Recomendacao_Estoque', 'Margem_Segura_6Meses', 'Tipo_Margem', 'Curva', 'Rank', 'Meses_Com_Vendas', 'Best_Seller'
+      'Media_Mensal', 'Recomendacao_Estoque', 'Margem_Segura_6Meses', 'Tipo_Margem', 'Media_6Meses', 'Curva', 'Rank', 'Meses_Com_Vendas', 'Best_Seller'
     ];
     
     const csvContent = [
@@ -478,7 +507,8 @@ const InventoryForecast = () => {
         item.mediaMensal.toFixed(2),
         item.recomendacaoEstoque.toFixed(0),
         Math.round(item.safeMargin.safeMargin),
-        item.safeMargin.recommendation,
+        item.safeMargin.marginType,
+        item.safeMargin.avgLast6Months.toFixed(0),
         item.curva,
         item.rank,
         item.monthsWithSales,
@@ -726,6 +756,42 @@ const InventoryForecast = () => {
             </div>
             <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Classe C</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: '#10b981' }}>{summary.classC}</p>
+          </div>
+
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: '#10b981',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Target style={{ width: '24px', height: '24px', color: 'white' }} />
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Margem Segura</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: '#10b981' }}>{summary.safeMarginCount}</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>≥{safeMarginThreshold.toLocaleString()}/mês</p>
+          </div>
+
+          <div className="card" style={{ textAlign: 'center' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: '#f59e0b',
+              borderRadius: 'var(--radius-lg)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto var(--spacing-md)'
+            }}>
+              <Target style={{ width: '24px', height: '24px', color: 'white' }} />
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Margem Conservadora</p>
+            <p style={{ fontSize: '2rem', fontWeight: '700', color: '#f59e0b' }}>{summary.conservativeMarginCount}</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>&lt;{safeMarginThreshold.toLocaleString()}/mês</p>
           </div>
         </div>
 
@@ -1246,14 +1312,21 @@ const InventoryForecast = () => {
                       padding: 'var(--spacing-md) var(--spacing-sm)', 
                       textAlign: 'right', 
                       fontSize: '0.875rem', 
-                      color: item.safeMargin.isAboveThreshold ? '#10b981' : '#f59e0b'
+                      color: item.safeMargin.marginType === 'safe' ? '#10b981' : '#f59e0b'
                     }}>
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                         <span style={{ fontWeight: '600' }}>
                           {Math.round(item.safeMargin.safeMargin).toLocaleString()}
                         </span>
                         <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
-                          {item.safeMargin.recommendation}
+                          {item.safeMargin.avgLast6Months.toFixed(0)}/mês
+                        </span>
+                        <span style={{ 
+                          fontSize: '0.625rem', 
+                          color: item.safeMargin.marginType === 'safe' ? '#10b981' : '#f59e0b',
+                          fontWeight: '500'
+                        }}>
+                          {item.safeMargin.marginType === 'safe' ? '✓ Segura' : '⚠ Conservadora'}
                         </span>
                       </div>
                     </td>
