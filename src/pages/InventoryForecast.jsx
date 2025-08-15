@@ -15,6 +15,9 @@ const InventoryForecast = () => {
   const [sortConfig, setSortConfig] = useState({ key: 'totalGeral', direction: 'desc' });
   const [kitRecommendations, setKitRecommendations] = useState([]);
   const [correlationThreshold, setCorrelationThreshold] = useState(0.6);
+  const [selectedKit, setSelectedKit] = useState(null);
+  const [safeMarginThreshold, setSafeMarginThreshold] = useState(5000);
+  const [productRecommendations, setProductRecommendations] = useState([]);
 
   const monthNames = [
     'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
@@ -83,7 +86,7 @@ const InventoryForecast = () => {
             totalSales: kitTotalSales,
             avgMonthlySales: kitAvgMonthly,
             recommendedStock: kitRecommendedStock,
-            potential: kitTotalSales * correlation, // Potential sales impact
+            potential: kitTotalSales * correlation, // Potential sales impact based on total annual sales and correlation strength
             type: 'duo'
           });
         }
@@ -91,10 +94,54 @@ const InventoryForecast = () => {
     }
 
     // Sort by potential and return top recommendations
-    return recommendations
+    const sortedRecommendations = recommendations
       .sort((a, b) => b.potential - a.potential)
       .slice(0, 20); // Top 20 kit recommendations
-  }, [correlationThreshold]);
+
+    // Generate product recommendations for products that appear in multiple kits
+    const productUsage = new Map();
+    
+    sortedRecommendations.forEach(kit => {
+      kit.products.forEach(product => {
+        if (!productUsage.has(product.sku)) {
+          productUsage.set(product.sku, {
+            sku: product.sku,
+            classification: product.classification,
+            totalSales: product.sales,
+            kitCount: 0,
+            kits: []
+          });
+        }
+        const productData = productUsage.get(product.sku);
+        productData.kitCount++;
+        productData.kits.push(kit.id);
+      });
+    });
+
+    // Create product recommendations for products used in multiple kits
+    const productRecommendations = Array.from(productUsage.values())
+      .filter(product => product.kitCount > 1)
+      .sort((a, b) => b.kitCount - a.kitCount)
+      .slice(0, 15); // Top 15 most used products
+
+    return { kits: sortedRecommendations, products: productRecommendations };
+  }, [correlationThreshold, safeMarginThreshold]);
+
+  // Calculate safe margin based on last 6 months average
+  const calculateSafeMargin = (sku) => {
+    const last6Months = [
+      sku.julho, sku.agosto, sku.setembro, sku.outubro, sku.novembro, sku.dezembro
+    ];
+    const avgLast6Months = last6Months.reduce((sum, val) => sum + val, 0) / 6;
+    const isAboveThreshold = avgLast6Months >= safeMarginThreshold;
+    
+    return {
+      avgLast6Months: avgLast6Months,
+      isAboveThreshold: isAboveThreshold,
+      safeMargin: isAboveThreshold ? avgLast6Months * 2.5 : avgLast6Months * 1.5,
+      recommendation: isAboveThreshold ? 'Margem Segura' : 'Margem Conservadora'
+    };
+  };
 
   // Calculate ABC classification based on cumulative sales
   const calculateABCClassification = (skuData) => {
@@ -210,17 +257,21 @@ const InventoryForecast = () => {
         const mediaMensal = totalGeral / 12; // Average across 12 months
         const recomendacaoEstoque = mediaMensal * 2.5; // Slightly higher multiplier for annual data
         
-        return {
-          ...sku,
-          totalGeral,
-          vendaMinima,
-          vendaMaxima,
-          mediaTotal,
-          mediaMensal,
-          recomendacaoEstoque,
-          isVisible: totalGeral > 0, // Show all SKUs with sales
-          monthsWithSales: nonZeroSales.length
-        };
+        // Calculate safe margin based on last 6 months
+        const safeMargin = calculateSafeMargin(sku);
+        
+                  return {
+            ...sku,
+            totalGeral,
+            vendaMinima,
+            vendaMaxima,
+            mediaTotal,
+            mediaMensal,
+            recomendacaoEstoque,
+            safeMargin,
+            isVisible: totalGeral > 0, // Show all SKUs with sales
+            monthsWithSales: nonZeroSales.length
+          };
       });
 
       console.log(`📊 Processed ${processedData.length} SKUs`);
@@ -267,9 +318,10 @@ const InventoryForecast = () => {
       console.log(`✅ Processed ${classifiedData.length} SKUs, ${bestSellerThreshold} best sellers, ${visibleThreshold} visible`);
       
       // Generate kit recommendations based on correlations
-      const kits = generateKitRecommendations(classifiedData);
-      setKitRecommendations(kits);
-      console.log(`🎯 Generated ${kits.length} kit recommendations`);
+      const recommendations = generateKitRecommendations(classifiedData);
+      setKitRecommendations(recommendations.kits);
+      setProductRecommendations(recommendations.products);
+      console.log(`🎯 Generated ${recommendations.kits.length} kit recommendations and ${recommendations.products.length} product recommendations`);
       
       return classifiedData;
       
@@ -331,11 +383,12 @@ const InventoryForecast = () => {
   // Regenerate kit recommendations when correlation threshold changes
   useEffect(() => {
     if (data.length > 0) {
-      const kits = generateKitRecommendations(data);
-      setKitRecommendations(kits);
-      console.log(`🎯 Regenerated ${kits.length} kit recommendations with ${correlationThreshold} threshold`);
+      const recommendations = generateKitRecommendations(data);
+      setKitRecommendations(recommendations.kits);
+      setProductRecommendations(recommendations.products);
+      console.log(`🎯 Regenerated ${recommendations.kits.length} kit recommendations and ${recommendations.products.length} product recommendations with ${correlationThreshold} threshold`);
     }
-  }, [correlationThreshold, data, generateKitRecommendations]);
+  }, [correlationThreshold, safeMarginThreshold, data, generateKitRecommendations]);
 
   const filteredData = useMemo(() => {
     let filtered = data.filter(item => {
@@ -408,7 +461,7 @@ const InventoryForecast = () => {
       'SKU', 'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
       'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
       'Total_Geral', 'Venda_Minima', 'Venda_Maxima', 'Media_Total', 
-      'Media_Mensal', 'Recomendacao_Estoque', 'Curva', 'Rank', 'Meses_Com_Vendas', 'Best_Seller'
+      'Media_Mensal', 'Recomendacao_Estoque', 'Margem_Segura_6Meses', 'Tipo_Margem', 'Curva', 'Rank', 'Meses_Com_Vendas', 'Best_Seller'
     ];
     
     const csvContent = [
@@ -424,6 +477,8 @@ const InventoryForecast = () => {
         item.mediaTotal.toFixed(2),
         item.mediaMensal.toFixed(2),
         item.recomendacaoEstoque.toFixed(0),
+        Math.round(item.safeMargin.safeMargin),
+        item.safeMargin.recommendation,
         item.curva,
         item.rank,
         item.monthsWithSales,
@@ -440,6 +495,16 @@ const InventoryForecast = () => {
         kit.totalSales,
         Math.round(kit.recommendedStock),
         Math.round(kit.potential)
+      ].join(';')),
+      '',
+      '=== PRODUTOS EM MÚLTIPLOS KITS ===',
+      'SKU;Classificacao;Vendas_Totais;Numero_Kits;Kits',
+      ...productRecommendations.map(product => [
+        `"${product.sku}"`,
+        product.classification,
+        product.totalSales,
+        product.kitCount,
+        product.kits.join(',')
       ].join(';'))
     ].join('\n');
     
@@ -713,9 +778,9 @@ const InventoryForecast = () => {
                   dataKey="sku" 
                   angle={-45} 
                   textAnchor="end" 
-                  height={80} 
-                  tick={{ fontSize: 10 }}
-                  tickFormatter={(value) => value.substring(0, 20) + '...'}
+                  height={100} 
+                  tick={{ fontSize: 9 }}
+                  tickFormatter={(value) => value.length > 25 ? value.substring(0, 25) + '...' : value}
                 />
                 <YAxis tick={{ fontSize: 12 }} />
                 <Tooltip 
@@ -829,6 +894,25 @@ const InventoryForecast = () => {
                 <option value={0.9}>90%</option>
               </select>
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
+              <label style={{ fontSize: '0.875rem', color: '#374151', fontWeight: '500' }}>
+                Margem Segura (6 meses):
+              </label>
+              <input
+                type="number"
+                value={safeMarginThreshold}
+                onChange={(e) => setSafeMarginThreshold(parseInt(e.target.value))}
+                className="btn btn-secondary"
+                style={{ 
+                  padding: 'var(--spacing-sm) var(--spacing-md)',
+                  width: '100px',
+                  textAlign: 'center'
+                }}
+                min="1000"
+                max="50000"
+                step="500"
+              />
+            </div>
           </div>
 
           {kitRecommendations.length > 0 ? (
@@ -842,6 +926,7 @@ const InventoryForecast = () => {
                   key={kit.id} 
                   className="card"
                   style={{ cursor: 'pointer', transition: 'all 0.2s' }}
+                  onClick={() => setSelectedKit(kit)}
                   onMouseEnter={(e) => {
                     e.currentTarget.style.transform = 'translateY(-2px)';
                     e.currentTarget.style.boxShadow = 'var(--shadow-lg)';
@@ -884,8 +969,18 @@ const InventoryForecast = () => {
                         borderBottom: productIndex < kit.products.length - 1 ? '1px solid #f1f5f9' : 'none'
                       }}>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
-                            {product.sku.length > 40 ? product.sku.substring(0, 40) + '...' : product.sku}
+                          <div 
+                            style={{ 
+                              fontSize: '0.875rem', 
+                              fontWeight: '500', 
+                              color: 'var(--charcoal-black)', 
+                              marginBottom: 'var(--spacing-xs)',
+                              cursor: product.sku.length > 50 ? 'help' : 'default',
+                              position: 'relative'
+                            }}
+                            title={product.sku.length > 50 ? product.sku : ''}
+                          >
+                            {product.sku.length > 50 ? product.sku.substring(0, 50) + '...' : product.sku}
                           </div>
                           <div style={{ fontSize: '0.75rem', color: '#6b7280' }}>
                             {product.sales.toLocaleString()} vendas
@@ -1027,6 +1122,16 @@ const InventoryForecast = () => {
                   }}>Rec. Est.</th>
                   <th style={{
                     padding: 'var(--spacing-md) var(--spacing-sm)',
+                    textAlign: 'right',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    borderBottom: '2px solid #cbd5e1'
+                  }}>Margem Segura</th>
+                  <th style={{
+                    padding: 'var(--spacing-md) var(--spacing-sm)',
                     textAlign: 'center',
                     fontSize: '0.75rem',
                     fontWeight: '600',
@@ -1058,7 +1163,7 @@ const InventoryForecast = () => {
                       fontSize: '0.875rem', 
                       fontWeight: '500', 
                       color: 'var(--charcoal-black)',
-                      maxWidth: '200px',
+                      maxWidth: '250px',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
@@ -1067,7 +1172,15 @@ const InventoryForecast = () => {
                       background: index % 2 === 0 ? '#ffffff' : '#fafbfc',
                       zIndex: 1
                     }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)' }}>
+                      <div 
+                        style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: 'var(--spacing-xs)',
+                          cursor: item.sku.length > 30 ? 'help' : 'default'
+                        }}
+                        title={item.sku.length > 30 ? item.sku : ''}
+                      >
                         {item.isBestSeller && <Star style={{ width: '14px', height: '14px', color: 'var(--orange)' }} />}
                         <span>{item.sku}</span>
                       </div>
@@ -1129,6 +1242,21 @@ const InventoryForecast = () => {
                     }}>
                       {Math.round(item.recomendacaoEstoque).toLocaleString()}
                     </td>
+                    <td style={{ 
+                      padding: 'var(--spacing-md) var(--spacing-sm)', 
+                      textAlign: 'right', 
+                      fontSize: '0.875rem', 
+                      color: item.safeMargin.isAboveThreshold ? '#10b981' : '#f59e0b'
+                    }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                        <span style={{ fontWeight: '600' }}>
+                          {Math.round(item.safeMargin.safeMargin).toLocaleString()}
+                        </span>
+                        <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                          {item.safeMargin.recommendation}
+                        </span>
+                      </div>
+                    </td>
                     <td style={{ padding: 'var(--spacing-md) var(--spacing-sm)', textAlign: 'center' }}>
                       <span style={{
                         display: 'inline-flex',
@@ -1172,6 +1300,265 @@ const InventoryForecast = () => {
             </div>
           )}
         </div>
+
+        {/* Product Recommendations */}
+        {productRecommendations.length > 0 && (
+          <div className="card" style={{ marginBottom: 'var(--spacing-2xl)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-lg)' }}>
+              <div>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-xs)' }}>
+                  🎯 Produtos em Múltiplos Kits
+                </h3>
+                <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                  Produtos que aparecem em vários kits - recomendações unitárias
+                </p>
+              </div>
+            </div>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))',
+              gap: 'var(--spacing-lg)'
+            }}>
+              {productRecommendations.map((product, index) => (
+                <div 
+                  key={product.sku} 
+                  className="card"
+                  style={{ cursor: 'pointer', transition: 'all 0.2s' }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                    e.currentTarget.style.boxShadow = 'var(--shadow-lg)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = 'var(--shadow-md)';
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-md)' }}>
+                    <div style={{
+                      background: 'var(--blue)',
+                      color: 'white',
+                      padding: 'var(--spacing-xs) var(--spacing-md)',
+                      borderRadius: '20px',
+                      fontSize: '0.75rem',
+                      fontWeight: '600'
+                    }}>
+                      Produto #{index + 1}
+                    </div>
+                    <div style={{
+                      background: product.kitCount >= 5 ? '#dcfce7' : product.kitCount >= 3 ? '#fef3c7' : '#fee2e2',
+                      color: product.kitCount >= 5 ? '#166534' : product.kitCount >= 3 ? '#92400e' : '#991b1b',
+                      padding: 'var(--spacing-xs) var(--spacing-sm)',
+                      borderRadius: 'var(--radius-md)',
+                      fontSize: '0.75rem',
+                      fontWeight: '600'
+                    }}>
+                      {product.kitCount} kits
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                    <div 
+                      style={{ 
+                        fontSize: '0.875rem', 
+                        fontWeight: '500', 
+                        color: 'var(--charcoal-black)', 
+                        marginBottom: 'var(--spacing-sm)',
+                        cursor: product.sku.length > 50 ? 'help' : 'default'
+                      }}
+                      title={product.sku.length > 50 ? product.sku : ''}
+                    >
+                      {product.sku.length > 50 ? product.sku.substring(0, 50) + '...' : product.sku}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm)' }}>
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: '24px',
+                        height: '24px',
+                        borderRadius: '50%',
+                        fontSize: '0.75rem',
+                        fontWeight: '600',
+                        backgroundColor: getClassificationBgColor(product.classification),
+                        color: getClassificationColor(product.classification)
+                      }}>
+                        {product.classification}
+                      </span>
+                      <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                        {product.totalSales.toLocaleString()} vendas totais
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{
+                    padding: 'var(--spacing-sm)',
+                    background: '#f8fafc',
+                    borderRadius: 'var(--radius-lg)',
+                    fontSize: '0.75rem',
+                    color: '#6b7280'
+                  }}>
+                    <div style={{ marginBottom: 'var(--spacing-xs)' }}>
+                      <strong>Kits:</strong> {product.kits.join(', ')}
+                    </div>
+                    <div>
+                      <strong>Recomendação:</strong> Produto versátil - manter estoque elevado
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Modal de Detalhes do Kit */}
+        {selectedKit && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 'var(--spacing-lg)'
+          }}
+          onClick={() => setSelectedKit(null)}
+          >
+            <div 
+              className="card"
+              style={{
+                maxWidth: '600px',
+                width: '100%',
+                maxHeight: '80vh',
+                overflow: 'auto',
+                position: 'relative'
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-lg)' }}>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)' }}>
+                  📦 Detalhes do Kit #{selectedKit.id.split('_')[1]}
+                </h3>
+                <button
+                  onClick={() => setSelectedKit(null)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    fontSize: '1.5rem',
+                    cursor: 'pointer',
+                    color: '#6b7280',
+                    padding: 'var(--spacing-xs)'
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+
+              <div style={{ marginBottom: 'var(--spacing-lg)' }}>
+                <div style={{
+                  background: selectedKit.correlation >= 0.8 ? '#dcfce7' : selectedKit.correlation >= 0.7 ? '#fef3c7' : '#fee2e2',
+                  color: selectedKit.correlation >= 0.8 ? '#166534' : selectedKit.correlation >= 0.7 ? '#92400e' : '#991b1b',
+                  padding: 'var(--spacing-sm) var(--spacing-md)',
+                  borderRadius: 'var(--radius-lg)',
+                  fontSize: '0.875rem',
+                  fontWeight: '600',
+                  textAlign: 'center',
+                  marginBottom: 'var(--spacing-md)'
+                }}>
+                  Correlação de Vendas: {(selectedKit.correlation * 100).toFixed(1)}%
+                </div>
+
+                <div style={{ marginBottom: 'var(--spacing-lg)' }}>
+                  <h4 style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--charcoal-black)', marginBottom: 'var(--spacing-md)' }}>
+                    Produtos do Kit:
+                  </h4>
+                  {selectedKit.products.map((product, index) => (
+                    <div key={index} style={{
+                      padding: 'var(--spacing-md)',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: 'var(--radius-lg)',
+                      marginBottom: 'var(--spacing-sm)',
+                      background: '#f8fafc'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-sm)' }}>
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: '28px',
+                          height: '28px',
+                          borderRadius: '50%',
+                          fontSize: '0.875rem',
+                          fontWeight: '600',
+                          backgroundColor: getClassificationBgColor(product.classification),
+                          color: getClassificationColor(product.classification)
+                        }}>
+                          {product.classification}
+                        </span>
+                        <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>
+                          {product.sales.toLocaleString()} vendas
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.875rem', color: 'var(--charcoal-black)', lineHeight: '1.4' }}>
+                        {product.sku}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                  gap: 'var(--spacing-md)',
+                  marginBottom: 'var(--spacing-lg)'
+                }}>
+                  <div style={{ textAlign: 'center', padding: 'var(--spacing-md)', background: '#f1f5f9', borderRadius: 'var(--radius-lg)' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Vendas Combinadas</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--charcoal-black)' }}>
+                      {selectedKit.totalSales.toLocaleString()}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: 'var(--spacing-md)', background: '#f1f5f9', borderRadius: 'var(--radius-lg)' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Estoque Recomendado</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--purple)' }}>
+                      {Math.round(selectedKit.recommendedStock).toLocaleString()}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: 'var(--spacing-md)', background: '#f1f5f9', borderRadius: 'var(--radius-lg)' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Potencial de Vendas</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: '600', color: 'var(--blue)' }}>
+                      {Math.round(selectedKit.potential).toLocaleString()}
+                    </div>
+                    <div style={{ fontSize: '0.625rem', color: '#6b7280', marginTop: 'var(--spacing-xs)' }}>
+                      (Anual × Correlação)
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{
+                  padding: 'var(--spacing-md)',
+                  background: 'var(--forest-green)',
+                  borderRadius: 'var(--radius-lg)',
+                  textAlign: 'center',
+                  color: 'white'
+                }}>
+                  <div style={{ fontSize: '0.875rem', fontWeight: '500', marginBottom: 'var(--spacing-xs)' }}>
+                    💡 Recomendação
+                  </div>
+                  <div style={{ fontSize: '0.75rem', opacity: 0.9 }}>
+                    Este kit apresenta alta correlação de vendas, indicando que os produtos são frequentemente comprados juntos. 
+                    O "Potencial de Vendas" é calculado multiplicando as vendas anuais combinadas pela força da correlação.
+                    Considere criar promoções combinadas ou posicioná-los próximos no estoque.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
