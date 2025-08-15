@@ -824,7 +824,7 @@ const InventoryForecast = () => {
             </div>
             <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: 'var(--spacing-xs)' }}>Kits Recomendados</p>
             <p style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--teal)' }}>{kitRecommendations.length}</p>
-            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>≥{(correlationThreshold * 100).toFixed(0)}% correlação</p>
+            <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>≥57.6% correlação</p>
           </div>
 
           <div className="card" style={{ textAlign: 'center' }}>
